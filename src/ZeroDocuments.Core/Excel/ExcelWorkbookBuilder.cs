@@ -4,7 +4,6 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
-using System.Reflection;
 using System.Text;
 using System.Xml;
 using ZeroDocuments.Common;
@@ -13,61 +12,57 @@ using ZeroDocuments.Excel.Models;
 namespace ZeroDocuments.Excel
 {
     /// <summary>
-    /// Pure C# Zero-Dependency OpenXML Excel (.xlsx) Writer.
-    /// Operates without external DLLs (No EPPlus, ClosedXML, or DocumentFormat.OpenXml required).
+    /// Fluent multi-sheet OpenXML Excel (.xlsx) workbook builder.
+    /// Pure C# BCL implementation with zero external dependencies.
     /// </summary>
-    public static class ExcelWriter
+    public sealed class ExcelWorkbookBuilder : IDisposable
     {
         private const string NsSpreadsheet = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         private const string NsRelationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 
+        private readonly List<WorksheetDefinition> _sheets = new List<WorksheetDefinition>();
+
         /// <summary>
         /// Gets or sets whether formula injection protection (CWE-1236) is enabled.
-        /// When true, strings beginning with =, +, -, @, \t, or \r are prefixed with a single quote.
         /// Default is true.
         /// </summary>
-        public static bool FormulaInjectionProtection { get; set; } = true;
+        public bool FormulaInjectionProtection { get; set; } = true;
 
-        static ExcelWriter()
+        private sealed class WorksheetDefinition
+        {
+            public string Name { get; set; } = string.Empty;
+            public IReadOnlyList<string>? Headers { get; set; }
+            public List<IReadOnlyList<object?>> Rows { get; } = new List<IReadOnlyList<object?>>();
+            public bool HeaderBold { get; set; } = true;
+        }
+
+        static ExcelWorkbookBuilder()
         {
             RuntimeAssemblyResolver.EnsureInitialized();
         }
 
-        #region Public Write APIs
+        #region Fluent AddSheet APIs
 
         /// <summary>
-        /// Writes a DataTable to an Excel (.xlsx) file on disk.
+        /// Adds a new worksheet populated from a System.Data.DataTable.
         /// </summary>
-        public static void WriteToFile(string filePath, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true)
+        public ExcelWorkbookBuilder AddSheet(string sheetName, DataTable table, bool includeHeaders = true, bool headerBold = true)
         {
-            if (string.IsNullOrEmpty(filePath))
-                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
-
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-            WriteToStream(stream, table, sheetName, includeHeaders);
-        }
-
-        /// <summary>
-        /// Writes a DataTable to a stream in OpenXML Excel (.xlsx) format.
-        /// </summary>
-        public static void WriteToStream(Stream stream, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true)
-        {
-            if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (table == null) throw new ArgumentNullException(nameof(table));
 
-            var headers = new List<string>();
+            var headers = new List<string>(table.Columns.Count);
             foreach (DataColumn col in table.Columns)
             {
                 headers.Add(col.ColumnName);
             }
 
-            var rows = new List<IReadOnlyList<object?>>();
+            var sheet = new WorksheetDefinition
+            {
+                Name = SanitizeSheetName(sheetName),
+                Headers = includeHeaders ? headers : null,
+                HeaderBold = headerBold
+            };
+
             foreach (DataRow row in table.Rows)
             {
                 var values = new object?[table.Columns.Count];
@@ -75,37 +70,18 @@ namespace ZeroDocuments.Excel
                 {
                     values[i] = row[i] == DBNull.Value ? null : row[i];
                 }
-                rows.Add(values);
+                sheet.Rows.Add(values);
             }
 
-            WriteRowsToStream(stream, rows, includeHeaders ? headers : null, sheetName);
+            _sheets.Add(sheet);
+            return this;
         }
 
         /// <summary>
-        /// Writes a collection of objects to an Excel (.xlsx) file on disk.
-        /// Public properties are mapped to columns.
+        /// Adds a new worksheet populated from an IEnumerable of strongly-typed POCO objects.
         /// </summary>
-        public static void WriteToFile<T>(string filePath, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true)
+        public ExcelWorkbookBuilder AddSheet<T>(string sheetName, IEnumerable<T> data, bool includeHeaders = true, bool headerBold = true)
         {
-            if (string.IsNullOrEmpty(filePath))
-                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
-
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-            WriteToStream(stream, data, sheetName, includeHeaders);
-        }
-
-        /// <summary>
-        /// Writes a collection of objects to a stream in OpenXML Excel (.xlsx) format.
-        /// </summary>
-        public static void WriteToStream<T>(Stream stream, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true)
-        {
-            if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (data == null) throw new ArgumentNullException(nameof(data));
 
             var accessors = PropertyAccessorCache.GetAccessors(typeof(T));
@@ -115,7 +91,13 @@ namespace ZeroDocuments.Excel
                 headers.Add(acc.Name);
             }
 
-            var rows = new List<IReadOnlyList<object?>>();
+            var sheet = new WorksheetDefinition
+            {
+                Name = SanitizeSheetName(sheetName),
+                Headers = includeHeaders ? headers : null,
+                HeaderBold = headerBold
+            };
+
             foreach (var item in data)
             {
                 if (item == null) continue;
@@ -124,66 +106,115 @@ namespace ZeroDocuments.Excel
                 {
                     values[i] = accessors[i].Getter(item);
                 }
-                rows.Add(values);
+                sheet.Rows.Add(values);
             }
 
-            WriteRowsToStream(stream, rows, includeHeaders ? headers : null, sheetName);
+            _sheets.Add(sheet);
+            return this;
         }
 
         /// <summary>
-        /// Writes raw 2D grid rows to an Excel (.xlsx) file on disk.
+        /// Adds a new worksheet populated from raw 2D grid rows.
         /// </summary>
-        public static void WriteToFile(string filePath, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
+        public ExcelWorkbookBuilder AddSheet(string sheetName, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, bool headerBold = true)
+        {
+            if (rows == null) throw new ArgumentNullException(nameof(rows));
+
+            var sheet = new WorksheetDefinition
+            {
+                Name = SanitizeSheetName(sheetName),
+                Headers = headers,
+                HeaderBold = headerBold
+            };
+
+            foreach (var r in rows)
+            {
+                sheet.Rows.Add(r);
+            }
+
+            _sheets.Add(sheet);
+            return this;
+        }
+
+        #endregion
+
+        #region Save & Export APIs
+
+        /// <summary>
+        /// Saves the workbook to an Excel (.xlsx) file on disk.
+        /// </summary>
+        public void Save(string filePath)
         {
             if (string.IsNullOrEmpty(filePath))
                 throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
 
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            string? dir = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
             {
-                Directory.CreateDirectory(directory);
+                Directory.CreateDirectory(dir);
             }
 
             using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
-            WriteRowsToStream(stream, rows, headers, sheetName);
+            Save(stream);
         }
 
         /// <summary>
-        /// Writes raw 2D grid rows to a stream in OpenXML Excel (.xlsx) format.
+        /// Saves the workbook to a destination stream in OpenXML Excel (.xlsx) format.
         /// </summary>
-        public static void WriteRowsToStream(Stream stream, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
+        public void Save(Stream stream)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
-            if (rows == null) throw new ArgumentNullException(nameof(rows));
 
-            string safeSheetName = string.IsNullOrWhiteSpace(sheetName) ? "Sheet1" : SanitizeSheetName(sheetName);
+            if (_sheets.Count == 0)
+            {
+                // Ensure at least 1 worksheet exists
+                AddSheet("Sheet1", Array.Empty<IReadOnlyList<object?>>());
+            }
 
             using var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true);
 
             // 1. [Content_Types].xml
-            CreateContentTypesEntry(zip);
+            CreateContentTypesEntry(zip, _sheets.Count);
 
             // 2. _rels/.rels
             CreateGlobalRelsEntry(zip);
 
             // 3. xl/workbook.xml
-            CreateWorkbookEntry(zip, safeSheetName);
+            CreateWorkbookEntry(zip, _sheets);
 
             // 4. xl/_rels/workbook.xml.rels
-            CreateWorkbookRelsEntry(zip);
+            CreateWorkbookRelsEntry(zip, _sheets.Count);
 
             // 5. xl/styles.xml
             CreateStylesEntry(zip);
 
-            // 6. xl/worksheets/sheet1.xml
-            CreateWorksheetEntry(zip, rows, headers);
+            // 6. xl/worksheets/sheet{N}.xml
+            for (int i = 0; i < _sheets.Count; i++)
+            {
+                CreateWorksheetEntry(zip, i + 1, _sheets[i]);
+            }
+        }
+
+        /// <summary>
+        /// Returns the entire workbook package as a byte array.
+        /// </summary>
+        public byte[] ToArray()
+        {
+            using var ms = new MemoryStream();
+            Save(ms);
+            return ms.ToArray();
+        }
+
+        public void Dispose()
+        {
+            _sheets.Clear();
         }
 
         #endregion
 
-        #region OPC Package Parts Generation
+        #region OPC Package Generation
 
-        private static void CreateContentTypesEntry(ZipArchive zip)
+        private static void CreateContentTypesEntry(ZipArchive zip, int sheetCount)
         {
             var entry = zip.CreateEntry("[Content_Types].xml", CompressionLevel.Fastest);
             using var stream = entry.Open();
@@ -208,14 +239,17 @@ namespace ZeroDocuments.Excel
             writer.WriteEndElement();
 
             writer.WriteStartElement("Override");
-            writer.WriteAttributeString("PartName", "/xl/worksheets/sheet1.xml");
-            writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml");
-            writer.WriteEndElement();
-
-            writer.WriteStartElement("Override");
             writer.WriteAttributeString("PartName", "/xl/styles.xml");
             writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml");
             writer.WriteEndElement();
+
+            for (int i = 1; i <= sheetCount; i++)
+            {
+                writer.WriteStartElement("Override");
+                writer.WriteAttributeString("PartName", $"/xl/worksheets/sheet{i}.xml");
+                writer.WriteAttributeString("ContentType", "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml");
+                writer.WriteEndElement();
+            }
 
             writer.WriteEndElement(); // Types
             writer.WriteEndDocument();
@@ -236,11 +270,11 @@ namespace ZeroDocuments.Excel
             writer.WriteAttributeString("Target", "xl/workbook.xml");
             writer.WriteEndElement();
 
-            writer.WriteEndElement(); // Relationships
+            writer.WriteEndElement();
             writer.WriteEndDocument();
         }
 
-        private static void CreateWorkbookEntry(ZipArchive zip, string sheetName)
+        private static void CreateWorkbookEntry(ZipArchive zip, List<WorksheetDefinition> sheets)
         {
             var entry = zip.CreateEntry("xl/workbook.xml", CompressionLevel.Fastest);
             using var stream = entry.Open();
@@ -251,18 +285,21 @@ namespace ZeroDocuments.Excel
             writer.WriteAttributeString("xmlns", "r", null, NsRelationships);
 
             writer.WriteStartElement("sheets");
-            writer.WriteStartElement("sheet");
-            writer.WriteAttributeString("name", sheetName);
-            writer.WriteAttributeString("sheetId", "1");
-            writer.WriteAttributeString("id", NsRelationships, "rId1");
-            writer.WriteEndElement(); // sheet
+            for (int i = 0; i < sheets.Count; i++)
+            {
+                writer.WriteStartElement("sheet");
+                writer.WriteAttributeString("name", sheets[i].Name);
+                writer.WriteAttributeString("sheetId", (i + 1).ToString(CultureInfo.InvariantCulture));
+                writer.WriteAttributeString("id", NsRelationships, $"rId{i + 1}");
+                writer.WriteEndElement();
+            }
             writer.WriteEndElement(); // sheets
 
             writer.WriteEndElement(); // workbook
             writer.WriteEndDocument();
         }
 
-        private static void CreateWorkbookRelsEntry(ZipArchive zip)
+        private static void CreateWorkbookRelsEntry(ZipArchive zip, int sheetCount)
         {
             var entry = zip.CreateEntry("xl/_rels/workbook.xml.rels", CompressionLevel.Fastest);
             using var stream = entry.Open();
@@ -271,19 +308,23 @@ namespace ZeroDocuments.Excel
             writer.WriteStartDocument(true);
             writer.WriteStartElement("Relationships", "http://schemas.openxmlformats.org/package/2006/relationships");
 
-            writer.WriteStartElement("Relationship");
-            writer.WriteAttributeString("Id", "rId1");
-            writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet");
-            writer.WriteAttributeString("Target", "worksheets/sheet1.xml");
-            writer.WriteEndElement();
+            for (int i = 1; i <= sheetCount; i++)
+            {
+                writer.WriteStartElement("Relationship");
+                writer.WriteAttributeString("Id", $"rId{i}");
+                writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet");
+                writer.WriteAttributeString("Target", $"worksheets/sheet{i}.xml");
+                writer.WriteEndElement();
+            }
 
+            // Styles relationship
             writer.WriteStartElement("Relationship");
-            writer.WriteAttributeString("Id", "rId2");
+            writer.WriteAttributeString("Id", $"rId{sheetCount + 1}");
             writer.WriteAttributeString("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles");
             writer.WriteAttributeString("Target", "styles.xml");
             writer.WriteEndElement();
 
-            writer.WriteEndElement(); // Relationships
+            writer.WriteEndElement();
             writer.WriteEndDocument();
         }
 
@@ -298,7 +339,9 @@ namespace ZeroDocuments.Excel
 
             // fonts
             writer.WriteStartElement("fonts");
-            writer.WriteAttributeString("count", "1");
+            writer.WriteAttributeString("count", "2");
+
+            // font 0: Regular
             writer.WriteStartElement("font");
             writer.WriteStartElement("sz");
             writer.WriteAttributeString("val", "11");
@@ -306,7 +349,20 @@ namespace ZeroDocuments.Excel
             writer.WriteStartElement("name");
             writer.WriteAttributeString("val", "Calibri");
             writer.WriteEndElement();
-            writer.WriteEndElement(); // font
+            writer.WriteEndElement();
+
+            // font 1: Bold
+            writer.WriteStartElement("font");
+            writer.WriteStartElement("b");
+            writer.WriteEndElement();
+            writer.WriteStartElement("sz");
+            writer.WriteAttributeString("val", "11");
+            writer.WriteEndElement();
+            writer.WriteStartElement("name");
+            writer.WriteAttributeString("val", "Calibri");
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+
             writer.WriteEndElement(); // fonts
 
             // fills
@@ -349,7 +405,9 @@ namespace ZeroDocuments.Excel
 
             // cellXfs
             writer.WriteStartElement("cellXfs");
-            writer.WriteAttributeString("count", "1");
+            writer.WriteAttributeString("count", "2");
+
+            // xf 0: Default
             writer.WriteStartElement("xf");
             writer.WriteAttributeString("numFmtId", "0");
             writer.WriteAttributeString("fontId", "0");
@@ -357,15 +415,26 @@ namespace ZeroDocuments.Excel
             writer.WriteAttributeString("borderId", "0");
             writer.WriteAttributeString("xfId", "0");
             writer.WriteEndElement();
+
+            // xf 1: Header Bold
+            writer.WriteStartElement("xf");
+            writer.WriteAttributeString("numFmtId", "0");
+            writer.WriteAttributeString("fontId", "1");
+            writer.WriteAttributeString("fillId", "0");
+            writer.WriteAttributeString("borderId", "0");
+            writer.WriteAttributeString("xfId", "0");
+            writer.WriteAttributeString("applyFont", "1");
             writer.WriteEndElement();
+
+            writer.WriteEndElement(); // cellXfs
 
             writer.WriteEndElement(); // styleSheet
             writer.WriteEndDocument();
         }
 
-        private static void CreateWorksheetEntry(ZipArchive zip, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers)
+        private void CreateWorksheetEntry(ZipArchive zip, int sheetIndex, WorksheetDefinition sheet)
         {
-            var entry = zip.CreateEntry("xl/worksheets/sheet1.xml", CompressionLevel.Fastest);
+            var entry = zip.CreateEntry($"xl/worksheets/sheet{sheetIndex}.xml", CompressionLevel.Fastest);
             using var stream = entry.Open();
             using var writer = CreateXmlWriter(stream);
 
@@ -377,16 +446,16 @@ namespace ZeroDocuments.Excel
             int currentRowIndex = 1;
 
             // 1. Write Header Row if provided
-            if (headers != null && headers.Count > 0)
+            if (sheet.Headers != null && sheet.Headers.Count > 0)
             {
                 writer.WriteStartElement("row");
                 writer.WriteAttributeString("r", currentRowIndex.ToString(CultureInfo.InvariantCulture));
 
-                for (int col = 0; col < headers.Count; col++)
+                for (int col = 0; col < sheet.Headers.Count; col++)
                 {
                     string colLetter = ExcelCellAddress.IndexToColumnName(col + 1);
                     string cellRef = $"{colLetter}{currentRowIndex}";
-                    WriteCellString(writer, cellRef, headers[col]);
+                    WriteCellString(writer, cellRef, sheet.Headers[col], styleIndex: sheet.HeaderBold ? 1 : 0);
                 }
 
                 writer.WriteEndElement(); // row
@@ -394,7 +463,7 @@ namespace ZeroDocuments.Excel
             }
 
             // 2. Write Data Rows
-            foreach (var rowValues in rows)
+            foreach (var rowValues in sheet.Rows)
             {
                 if (rowValues == null)
                 {
@@ -425,11 +494,7 @@ namespace ZeroDocuments.Excel
             writer.WriteEndDocument();
         }
 
-        #endregion
-
-        #region Cell Value Helpers
-
-        private static void WriteCellValue(XmlWriter writer, string cellRef, object val)
+        private void WriteCellValue(XmlWriter writer, string cellRef, object val)
         {
             switch (val)
             {
@@ -486,7 +551,7 @@ namespace ZeroDocuments.Excel
             }
         }
 
-        private static void WriteCellString(XmlWriter writer, string cellRef, string rawText)
+        private void WriteCellString(XmlWriter writer, string cellRef, string rawText, int styleIndex = 0)
         {
             string safeText = FormulaInjectionProtection ? SanitizeFormulaInjection(rawText) : rawText;
             string cleanText = SanitizeXmlText(safeText);
@@ -494,6 +559,10 @@ namespace ZeroDocuments.Excel
             writer.WriteStartElement("c");
             writer.WriteAttributeString("r", cellRef);
             writer.WriteAttributeString("t", "inlineStr");
+            if (styleIndex > 0)
+            {
+                writer.WriteAttributeString("s", styleIndex.ToString(CultureInfo.InvariantCulture));
+            }
 
             writer.WriteStartElement("is");
             writer.WriteStartElement("t");
@@ -510,9 +579,8 @@ namespace ZeroDocuments.Excel
 
         private static string SanitizeSheetName(string name)
         {
-            if (string.IsNullOrWhiteSpace(name)) return "Sheet1";
+            if (string.IsNullOrWhiteSpace(name)) return "Sheet";
 
-            // Excel sheet names cannot contain: \ / ? * : [ ] and max 31 characters
             var sb = new StringBuilder(name.Length);
             foreach (char ch in name)
             {
@@ -528,14 +596,10 @@ namespace ZeroDocuments.Excel
                 result = result.Substring(0, 31);
             }
 
-            return string.IsNullOrEmpty(result) ? "Sheet1" : result;
+            return string.IsNullOrEmpty(result) ? "Sheet" : result;
         }
 
-        /// <summary>
-        /// Sanitizes text to prevent formula injection attacks (CWE-1236).
-        /// Prefixes a single quote if the first character is =, +, -, @, \t, or \r.
-        /// </summary>
-        public static string SanitizeFormulaInjection(string? text)
+        private static string SanitizeFormulaInjection(string? text)
         {
             if (string.IsNullOrEmpty(text)) return string.Empty;
             char firstChar = text![0];
@@ -553,8 +617,6 @@ namespace ZeroDocuments.Excel
             var sb = new StringBuilder(text.Length);
             foreach (char ch in text)
             {
-                // XML 1.0 valid characters:
-                // #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD]
                 if (ch == 0x9 || ch == 0xA || ch == 0xD ||
                     (ch >= 0x20 && ch <= 0xD7FF) ||
                     (ch >= 0xE000 && ch <= 0xFFFD))

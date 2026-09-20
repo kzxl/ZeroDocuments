@@ -16,6 +16,7 @@ namespace ZeroDocuments.Excel.Models
     {
         public int RowNumber { get; set; }
         public Dictionary<int, string?> Cells { get; } = new Dictionary<int, string?>();
+        public IEnumerable<int> PopulatedColumns => Cells.Keys;
 
         public string? this[int columnIndex]
         {

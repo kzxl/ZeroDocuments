@@ -4,6 +4,7 @@ using System.Data;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using ZeroDocuments.Common;
 
 namespace ZeroDocuments.Csv
 {
@@ -13,6 +14,12 @@ namespace ZeroDocuments.Csv
     /// </summary>
     public static class CsvWriter
     {
+        /// <summary>
+        /// Gets or sets whether formula injection protection (CWE-1236) is enabled.
+        /// When true, fields beginning with =, +, -, @, \t, or \r are prefixed with a single quote.
+        /// Default is true.
+        /// </summary>
+        public static bool FormulaInjectionProtection { get; set; } = true;
         /// <summary>
         /// Writes a DataTable to a CSV file.
         /// </summary>
@@ -85,21 +92,21 @@ namespace ZeroDocuments.Csv
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (data == null) throw new ArgumentNullException(nameof(data));
 
-            var properties = typeof(T).GetProperties(BindingFlags.Public | BindingFlags.Instance);
-            var headers = new List<string>();
-            foreach (var prop in properties)
+            var accessors = PropertyAccessorCache.GetAccessors(typeof(T));
+            var headers = new List<string>(accessors.Length);
+            foreach (var acc in accessors)
             {
-                headers.Add(prop.Name);
+                headers.Add(acc.Name);
             }
 
             var rows = new List<IReadOnlyList<object?>>();
             foreach (var item in data)
             {
                 if (item == null) continue;
-                var values = new object?[properties.Length];
-                for (int i = 0; i < properties.Length; i++)
+                var values = new object?[accessors.Length];
+                for (int i = 0; i < accessors.Length; i++)
                 {
-                    values[i] = properties[i].GetValue(item);
+                    values[i] = accessors[i].Getter(item);
                 }
                 rows.Add(values);
             }
@@ -159,15 +166,25 @@ namespace ZeroDocuments.Csv
         {
             if (string.IsNullOrEmpty(field)) return string.Empty;
 
-            bool mustQuote = field!.IndexOf(delimiter) >= 0 ||
-                             field.IndexOf('"') >= 0 ||
-                             field.IndexOf('\n') >= 0 ||
-                             field.IndexOf('\r') >= 0;
+            string processed = field!;
+            if (FormulaInjectionProtection && processed.Length > 0)
+            {
+                char first = processed[0];
+                if (first == '=' || first == '+' || first == '-' || first == '@' || first == '\t' || first == '\r')
+                {
+                    processed = "'" + processed;
+                }
+            }
 
-            if (!mustQuote) return field;
+            bool mustQuote = processed.IndexOf(delimiter) >= 0 ||
+                             processed.IndexOf('"') >= 0 ||
+                             processed.IndexOf('\n') >= 0 ||
+                             processed.IndexOf('\r') >= 0;
+
+            if (!mustQuote) return processed;
 
             // Double up internal quotes: " -> ""
-            string escaped = field.Replace("\"", "\"\"");
+            string escaped = processed.Replace("\"", "\"\"");
             return $"\"{escaped}\"";
         }
     }
