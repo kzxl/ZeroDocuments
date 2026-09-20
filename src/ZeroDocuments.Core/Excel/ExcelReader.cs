@@ -403,9 +403,12 @@ namespace ZeroDocuments.Excel
                         if (entry != null) return entry;
                     }
                 }
+
+                // If a specific sheet name was requested but could not be resolved, do not return the wrong sheet.
+                return null;
             }
 
-            // Fallback: first sheet entry in xl/worksheets/
+            // Fallback when no specific sheetName is requested: first sheet entry in xl/worksheets/
             return zip.Entries.FirstOrDefault(e => e.FullName.Equals("xl/worksheets/sheet1.xml", StringComparison.OrdinalIgnoreCase))
                    ?? zip.Entries.FirstOrDefault(e => e.FullName.StartsWith("xl/worksheets/sheet", StringComparison.OrdinalIgnoreCase) && e.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase));
         }
@@ -429,6 +432,13 @@ namespace ZeroDocuments.Excel
                 return bool.Parse(raw);
             }
             if (underlying == typeof(DateTime)) return DateTime.Parse(raw, CultureInfo.InvariantCulture);
+            if (underlying == typeof(DateTimeOffset)) return DateTimeOffset.Parse(raw, CultureInfo.InvariantCulture);
+            if (underlying == typeof(TimeSpan)) return TimeSpan.Parse(raw, CultureInfo.InvariantCulture);
+            if (underlying == typeof(Guid)) return Guid.Parse(raw);
+            if (underlying.IsEnum)
+            {
+                return Enum.Parse(underlying, raw, true);
+            }
 
             return Convert.ChangeType(raw, underlying, CultureInfo.InvariantCulture);
         }

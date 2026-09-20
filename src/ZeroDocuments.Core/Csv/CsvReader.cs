@@ -37,6 +37,12 @@ namespace ZeroDocuments.Csv
             bool isFirst = true;
             foreach (var row in ReadRows(reader, delimiter))
             {
+                // Skip completely empty or whitespace lines
+                if (row.Count == 0 || (row.Count == 1 && string.IsNullOrWhiteSpace(row[0])))
+                {
+                    continue;
+                }
+
                 if (isFirst)
                 {
                     isFirst = false;
@@ -92,10 +98,21 @@ namespace ZeroDocuments.Csv
             var row = new List<string>();
             var fieldBuilder = new StringBuilder();
             bool inQuotes = false;
+            bool isFirstChar = true;
             int chInt;
 
             while ((chInt = reader.Read()) != -1)
             {
+                if (isFirstChar)
+                {
+                    isFirstChar = false;
+                    // Strip UTF-8 / Unicode BOM (U+FEFF) if present at stream start
+                    if (chInt == 0xFEFF)
+                    {
+                        continue;
+                    }
+                }
+
                 char ch = (char)chInt;
 
                 if (inQuotes)

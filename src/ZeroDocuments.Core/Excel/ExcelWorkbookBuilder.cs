@@ -58,7 +58,7 @@ namespace ZeroDocuments.Excel
 
             var sheet = new WorksheetDefinition
             {
-                Name = SanitizeSheetName(sheetName),
+                Name = GetUniqueSheetName(sheetName),
                 Headers = includeHeaders ? headers : null,
                 HeaderBold = headerBold
             };
@@ -93,7 +93,7 @@ namespace ZeroDocuments.Excel
 
             var sheet = new WorksheetDefinition
             {
-                Name = SanitizeSheetName(sheetName),
+                Name = GetUniqueSheetName(sheetName),
                 Headers = includeHeaders ? headers : null,
                 HeaderBold = headerBold
             };
@@ -122,7 +122,7 @@ namespace ZeroDocuments.Excel
 
             var sheet = new WorksheetDefinition
             {
-                Name = SanitizeSheetName(sheetName),
+                Name = GetUniqueSheetName(sheetName),
                 Headers = headers,
                 HeaderBold = headerBold
             };
@@ -575,6 +575,40 @@ namespace ZeroDocuments.Excel
             writer.WriteEndElement(); // is
 
             writer.WriteEndElement(); // c
+        }
+
+        private string GetUniqueSheetName(string rawName)
+        {
+            string baseName = SanitizeSheetName(rawName);
+            string uniqueName = baseName;
+            int counter = 1;
+
+            while (ContainsSheetName(uniqueName))
+            {
+                string suffix = $"_{counter++}";
+                if (baseName.Length + suffix.Length > 31)
+                {
+                    uniqueName = baseName.Substring(0, 31 - suffix.Length) + suffix;
+                }
+                else
+                {
+                    uniqueName = baseName + suffix;
+                }
+            }
+
+            return uniqueName;
+        }
+
+        private bool ContainsSheetName(string name)
+        {
+            for (int i = 0; i < _sheets.Count; i++)
+            {
+                if (string.Equals(_sheets[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private static string SanitizeSheetName(string name)
