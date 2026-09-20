@@ -615,8 +615,20 @@ namespace ZeroDocuments.Excel
             if (string.IsNullOrEmpty(text)) return string.Empty;
 
             var sb = new StringBuilder(text.Length);
-            foreach (char ch in text)
+            for (int i = 0; i < text.Length; i++)
             {
+                char ch = text[i];
+
+                // Preserve valid surrogate pairs (e.g., emojis, supplementary multilingual characters)
+                if (char.IsHighSurrogate(ch) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                {
+                    sb.Append(ch);
+                    sb.Append(text[++i]);
+                    continue;
+                }
+
+                // XML 1.0 valid single-char code points:
+                // #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD]
                 if (ch == 0x9 || ch == 0xA || ch == 0xD ||
                     (ch >= 0x20 && ch <= 0xD7FF) ||
                     (ch >= 0xE000 && ch <= 0xFFFD))

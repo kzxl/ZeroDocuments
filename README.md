@@ -3,7 +3,7 @@
 [![NuGet Version](https://img.shields.io/badge/nuget-v1.1.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
-[![Tests: 27 Passed](https://img.shields.io/badge/Tests-27%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests: 49 Passed](https://img.shields.io/badge/Tests-49%20Passed%20(100%25)-brightgreen.svg)]()
 [![Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-orange.svg)]()
 
 > **Architectural Standard**: 100% Pure C# BCL, Zero External Dependencies (No EPPlus, ClosedXML, or DevExpress), Multi-Targeting across `.NET 8.0`, `.NET Framework 4.6.2`, and `.NET Standard 2.0`.

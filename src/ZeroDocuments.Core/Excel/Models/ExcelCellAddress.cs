@@ -8,7 +8,7 @@ namespace ZeroDocuments.Excel.Models
     /// </summary>
     public static class ExcelCellAddress
     {
-        public const string DefaultRange = "A1:ZZ5000";
+        public const string DefaultRange = "A1:ZZ1048576";
 
         /// <summary>
         /// Converts Excel column name to 1-based index (e.g., "A" -> 1, "Z" -> 26, "AA" -> 27).
@@ -74,7 +74,7 @@ namespace ZeroDocuments.Excel.Models
             startCol = "A";
             startRow = 1;
             endCol = "ZZ";
-            endRow = 5000;
+            endRow = 1048576;
 
             if (string.IsNullOrWhiteSpace(range)) return;
 
