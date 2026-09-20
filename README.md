@@ -1,9 +1,9 @@
 # ZeroDocuments
 
-[![NuGet Version](https://img.shields.io/badge/nuget-v1.1.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
+[![NuGet Version](https://img.shields.io/badge/nuget-v1.2.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
-[![Tests: 85 Passed](https://img.shields.io/badge/Tests-85%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests: 91 Passed](https://img.shields.io/badge/Tests-91%20Passed%20(100%25)-brightgreen.svg)]()
 [![Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-orange.svg)]()
 
 > **Architectural Standard**: 100% Pure C# BCL, Zero External Dependencies (No EPPlus, ClosedXML, or DevExpress), Multi-Targeting across `.NET 8.0`, `.NET Framework 4.6.2`, and `.NET Standard 2.0`.
@@ -69,6 +69,15 @@ ZeroDocuments.Core
 
 ### 5. Self-Healing Runtime Assembly Resolver (`RuntimeAssemblyResolver`)
 - Automatically resolves `.NET Framework 4.6.2` assembly binding redirects for `System.IO.Compression`.
+
+### 6. OpenXML DrawingML Image Engine (`AddImage` & `ExtractImages`)
+- **Direct Image Embedding**: Embed PNG, JPEG, and JPG images into any worksheet with precise cell anchors, pixel dimensions, and EMU coordinate scaling.
+- **Embedded Media Extraction**: Extract all embedded images from existing `.xlsx` packages via `ExcelReader.ExtractImages`.
+
+### 7. Rich Conditional Formatting & AutoFilter
+- **Cell Highlight Rules**: Highlight cells matching conditions (GreaterThan, LessThan, Equal, Between) with custom ARGB background fills and bold fonts via OpenXML DXF styles.
+- **Color Scales & Data Bars**: Generate 2-color / 3-color gradient heatmaps and horizontal data bars.
+- **AutoFilter**: One-line automatic header filtering (`SetAutoFilter`).
 
 ---
 
@@ -140,6 +149,35 @@ DataTable csvData = CsvReader.ReadToDataTable("telemetry.csv", delimiter: ',');
 
 // Write DataTable to CSV (with automatic formula injection mitigation)
 CsvWriter.WriteToFile("output.csv", csvData, delimiter: ';', includeHeaders: true);
+```
+
+### 6. Embed Images via OpenXML DrawingML
+```csharp
+using ZeroDocuments.Excel;
+
+byte[] logoBytes = File.ReadAllBytes("company_logo.png");
+
+using var workbook = ZeroExcel.Create();
+workbook.AddSheet("Invoice", invoiceRows, headers: new[] { "Item", "Quantity", "Price" })
+        .AddImage("Invoice", logoBytes, format: "png", column: 5, row: 1, widthPx: 140, heightPx: 70, name: "CompanyLogo")
+        .Save("InvoiceWithLogo.xlsx");
+
+// Extract embedded media from existing workbooks
+List<ExcelEmbeddedImage> images = ExcelReader.ExtractImages("InvoiceWithLogo.xlsx");
+```
+
+### 7. Conditional Formatting & AutoFilter
+```csharp
+using ZeroDocuments.Excel;
+using ZeroDocuments.Excel.Models;
+
+using var workbook = ZeroExcel.Create();
+workbook.AddSheet("KPI", salesData, headers: new[] { "Region", "Sales", "Target" })
+        .SetAutoFilter("KPI") // Enable header filter dropdowns
+        .AddHighlightRule("KPI", "B2:B100", CellRuleOperator.LessThan, "5000",
+                          fillColorHex: "FFC7CE", fontColorHex: "9C0006", bold: true)
+        .AddColorScale("KPI", "C2:C100", minColorHex: "F8696B", maxColorHex: "63BE7B")
+        .Save("KpiDashboard.xlsx");
 ```
 
 ---

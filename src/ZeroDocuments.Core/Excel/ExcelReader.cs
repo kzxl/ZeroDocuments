@@ -444,5 +444,52 @@ namespace ZeroDocuments.Excel
         }
 
         #endregion
+
+        #region Embedded Media APIs
+
+        /// <summary>
+        /// Extracts all embedded images from an Excel (.xlsx) file on disk.
+        /// </summary>
+        public static List<ExcelEmbeddedImage> ExtractImages(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+
+            using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return ExtractImages(stream);
+        }
+
+        /// <summary>
+        /// Extracts all embedded images from an Excel (.xlsx) stream.
+        /// </summary>
+        public static List<ExcelEmbeddedImage> ExtractImages(Stream stream)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+
+            var images = new List<ExcelEmbeddedImage>();
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+
+            foreach (var entry in zip.Entries)
+            {
+                if (entry.FullName.StartsWith("xl/media/", StringComparison.OrdinalIgnoreCase))
+                {
+                    using var entryStream = entry.Open();
+                    using var ms = new MemoryStream();
+                    entryStream.CopyTo(ms);
+
+                    string ext = Path.GetExtension(entry.Name).TrimStart('.').ToLowerInvariant();
+                    images.Add(new ExcelEmbeddedImage
+                    {
+                        Name = Path.GetFileNameWithoutExtension(entry.Name),
+                        Format = ext,
+                        Data = ms.ToArray()
+                    });
+                }
+            }
+
+            return images;
+        }
+
+        #endregion
     }
 }
