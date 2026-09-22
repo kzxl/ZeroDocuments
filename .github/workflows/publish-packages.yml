@@ -26,6 +26,12 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+          source-url: https://nuget.pkg.github.com/kzxl/index.json
+        env:
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Unit Tests
+        run: dotnet test tests/ZeroDocuments.Tests/ZeroDocuments.Tests.csproj -c Release --verbosity normal
 
       - name: Pack ZeroDocuments.Core
         run: dotnet pack src/ZeroDocuments.Core/ZeroDocuments.Core.csproj -c Release -o nupkgs

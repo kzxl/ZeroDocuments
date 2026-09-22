@@ -1,7 +1,7 @@
 # ZeroDocuments
 
 [![ZeroPlatform Tier](https://img.shields.io/badge/ZeroPlatform-Tier%205%20(Presentation%20%26%20Apps)-e11d48.svg)](https://github.com/kzxl/ZeroPlatform)
-[![NuGet Version](https://img.shields.io/badge/nuget-v1.2.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
+[![NuGet Version](https://img.shields.io/badge/nuget-v1.3.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
 [![Tests: 91 Passed](https://img.shields.io/badge/Tests-91%20Passed%20(100%25)-brightgreen.svg)]()
@@ -190,6 +190,27 @@ workbook.AddSheet("KPI", salesData, headers: new[] { "Region", "Sales", "Target"
 | **.NET 8.0+** | Native (`net8.0`) | High-throughput ZIP and memory optimization |
 | **.NET Framework** | Legacy WinForms / WPF (`net462`) | Includes automatic assembly resolver for compression |
 | **.NET Standard** | Universal Cross-Platform (`netstandard2.0`) | Universal compatibility for shared libraries |
+
+---
+
+## 🏛️ Ecosystem Architectural Alignment
+
+ZeroDocuments is a sovereign member of **Tier 5 (Presentation & Orchestration)** within the **ZeroPlatform** industrial automation ecosystem.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Tier 5: Presentation & Orchestration (ZeroDocuments)    │
+└────────────────────────────┬─────────────────────────────┘
+                             │ consumes
+                             ▼
+┌──────────────────────────────────────────────────────────┐
+│ Tier 0: Primitives & Memory (ZeroPrimitives.Core 1.3.0)  │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **Upstream Ingestion**: Consumes Tier 0 foundational abstractions (`ZeroPrimitives.Core 1.3.0`).
+- **Strict DAG Conformance**: Zero references to parallel presentation or higher layers.
+- **Packaging & CI/CD**: Standardized under `Company = ZeroPlatform`, `Authors = Phong Võ`, `<ZeroTier>5</ZeroTier>`.
 
 ---
 
