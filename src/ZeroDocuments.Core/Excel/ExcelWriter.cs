@@ -4,6 +4,7 @@ using System.Data;
 using System.IO;
 using ZeroDocuments.Common;
 using ZeroDocuments.Excel.Internal;
+using ZeroDocuments.Excel.Models;
 
 namespace ZeroDocuments.Excel
 {
@@ -20,8 +21,8 @@ namespace ZeroDocuments.Excel
         /// Default is true.
         /// </summary>
         /// <remarks>
-        /// This is process-wide state. Prefer <see cref="ExcelWorkbookBuilder.FormulaInjectionProtection"/>
-        /// (per-instance) when different call sites require different policies.
+        /// This is process-wide fallback state. Prefer passing <see cref="ExcelWriterOptions"/>
+        /// or configuring <see cref="ExcelWorkbookBuilder.FormulaInjection"/> per-call.
         /// </remarks>
         public static bool FormulaInjectionProtection { get; set; } = true;
 
@@ -33,63 +34,96 @@ namespace ZeroDocuments.Excel
         #region Public Write APIs
 
         /// <summary>
-        /// Writes a DataTable to an Excel (.xlsx) file on disk.
+        /// Writes a DataTable to an Excel (.xlsx) file on disk atomically.
         /// </summary>
-        public static void WriteToFile(string filePath, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true)
+        public static void WriteToFile(string filePath, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true) =>
+            WriteToFile(filePath, table, null, sheetName, includeHeaders);
+
+        /// <summary>
+        /// Writes a DataTable to an Excel (.xlsx) file on disk atomically with custom options.
+        /// </summary>
+        public static void WriteToFile(string filePath, DataTable table, ExcelWriterOptions? options, string sheetName = "Sheet1", bool includeHeaders = true)
         {
             if (table == null) throw new ArgumentNullException(nameof(table));
-            using var stream = CreateFile(filePath);
-            WriteToStream(stream, table, sheetName, includeHeaders);
+            AtomicFileWriter.Write(filePath, stream => WriteToStream(stream, table, options, sheetName, includeHeaders));
         }
 
         /// <summary>
         /// Writes a DataTable to a stream in OpenXML Excel (.xlsx) format.
         /// </summary>
-        public static void WriteToStream(Stream stream, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true)
+        public static void WriteToStream(Stream stream, DataTable table, string sheetName = "Sheet1", bool includeHeaders = true) =>
+            WriteToStream(stream, table, null, sheetName, includeHeaders);
+
+        /// <summary>
+        /// Writes a DataTable to a stream in OpenXML Excel (.xlsx) format with custom options.
+        /// </summary>
+        public static void WriteToStream(Stream stream, DataTable table, ExcelWriterOptions? options, string sheetName = "Sheet1", bool includeHeaders = true)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (table == null) throw new ArgumentNullException(nameof(table));
 
-            WriteRowsToStream(stream, TabularSource.FromDataTable(table), includeHeaders ? TabularSource.GetHeaders(table) : null, sheetName);
+            WriteRowsToStream(stream, TabularSource.FromDataTable(table), options, includeHeaders ? TabularSource.GetHeaders(table) : null, sheetName);
         }
 
         /// <summary>
-        /// Writes a collection of objects to an Excel (.xlsx) file on disk.
+        /// Writes a collection of objects to an Excel (.xlsx) file on disk atomically.
         /// Public properties are mapped to columns.
         /// </summary>
-        public static void WriteToFile<T>(string filePath, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true)
+        public static void WriteToFile<T>(string filePath, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true) =>
+            WriteToFile(filePath, data, null, sheetName, includeHeaders);
+
+        /// <summary>
+        /// Writes a collection of objects to an Excel (.xlsx) file on disk atomically with custom options.
+        /// </summary>
+        public static void WriteToFile<T>(string filePath, IEnumerable<T> data, ExcelWriterOptions? options, string sheetName = "Sheet1", bool includeHeaders = true)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
-            using var stream = CreateFile(filePath);
-            WriteToStream(stream, data, sheetName, includeHeaders);
+            AtomicFileWriter.Write(filePath, stream => WriteToStream(stream, data, options, sheetName, includeHeaders));
         }
 
         /// <summary>
         /// Writes a collection of objects to a stream in OpenXML Excel (.xlsx) format.
         /// </summary>
-        public static void WriteToStream<T>(Stream stream, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true)
+        public static void WriteToStream<T>(Stream stream, IEnumerable<T> data, string sheetName = "Sheet1", bool includeHeaders = true) =>
+            WriteToStream(stream, data, null, sheetName, includeHeaders);
+
+        /// <summary>
+        /// Writes a collection of objects to a stream in OpenXML Excel (.xlsx) format with custom options.
+        /// </summary>
+        public static void WriteToStream<T>(Stream stream, IEnumerable<T> data, ExcelWriterOptions? options, string sheetName = "Sheet1", bool includeHeaders = true)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (data == null) throw new ArgumentNullException(nameof(data));
 
             var accessors = PropertyAccessorCache.GetAccessors(typeof(T));
-            WriteRowsToStream(stream, TabularSource.FromObjects(data, accessors), includeHeaders ? TabularSource.GetHeaders(accessors) : null, sheetName);
+            WriteRowsToStream(stream, TabularSource.FromObjects(data, accessors), options, includeHeaders ? TabularSource.GetHeaders(accessors) : null, sheetName);
         }
 
         /// <summary>
-        /// Writes raw 2D grid rows to an Excel (.xlsx) file on disk.
+        /// Writes raw 2D grid rows to an Excel (.xlsx) file on disk atomically.
         /// </summary>
-        public static void WriteToFile(string filePath, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
+        public static void WriteToFile(string filePath, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1") =>
+            WriteToFile(filePath, rows, null, headers, sheetName);
+
+        /// <summary>
+        /// Writes raw 2D grid rows to an Excel (.xlsx) file on disk atomically with custom options.
+        /// </summary>
+        public static void WriteToFile(string filePath, IEnumerable<IReadOnlyList<object?>> rows, ExcelWriterOptions? options, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
         {
             if (rows == null) throw new ArgumentNullException(nameof(rows));
-            using var stream = CreateFile(filePath);
-            WriteRowsToStream(stream, rows, headers, sheetName);
+            AtomicFileWriter.Write(filePath, stream => WriteRowsToStream(stream, rows, options, headers, sheetName));
         }
 
         /// <summary>
         /// Writes raw 2D grid rows to a stream in OpenXML Excel (.xlsx) format.
         /// </summary>
-        public static void WriteRowsToStream(Stream stream, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
+        public static void WriteRowsToStream(Stream stream, IEnumerable<IReadOnlyList<object?>> rows, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1") =>
+            WriteRowsToStream(stream, rows, null, headers, sheetName);
+
+        /// <summary>
+        /// Writes raw 2D grid rows to a stream in OpenXML Excel (.xlsx) format with custom options.
+        /// </summary>
+        public static void WriteRowsToStream(Stream stream, IEnumerable<IReadOnlyList<object?>> rows, ExcelWriterOptions? options, IReadOnlyList<string>? headers = null, string sheetName = "Sheet1")
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (rows == null) throw new ArgumentNullException(nameof(rows));
@@ -102,7 +136,8 @@ namespace ZeroDocuments.Excel
                 HeaderBold = false
             };
 
-            XlsxPackageWriter.Write(stream, new[] { sheet }, FormulaInjectionProtection);
+            var mode = options?.FormulaInjection ?? (FormulaInjectionProtection ? FormulaInjectionMode.PrefixQuote : FormulaInjectionMode.Disabled);
+            XlsxPackageWriter.Write(stream, new[] { sheet }, mode);
         }
 
         #endregion

@@ -18,10 +18,20 @@ namespace ZeroDocuments.Excel
         private readonly List<WorksheetDefinition> _sheets = new List<WorksheetDefinition>();
 
         /// <summary>
+        /// Gets or sets the formula injection (CWE-1236) mitigation mode.
+        /// Default is <see cref="FormulaInjectionMode.PrefixQuote"/>.
+        /// </summary>
+        public FormulaInjectionMode FormulaInjection { get; set; } = FormulaInjectionMode.PrefixQuote;
+
+        /// <summary>
         /// Gets or sets whether formula injection protection (CWE-1236) is enabled.
         /// Default is true.
         /// </summary>
-        public bool FormulaInjectionProtection { get; set; } = true;
+        public bool FormulaInjectionProtection
+        {
+            get => FormulaInjection != FormulaInjectionMode.Disabled;
+            set => FormulaInjection = value ? FormulaInjectionMode.PrefixQuote : FormulaInjectionMode.Disabled;
+        }
 
         private sealed class WorksheetDefinition
         {
@@ -248,12 +258,11 @@ namespace ZeroDocuments.Excel
         #region Save & Export APIs
 
         /// <summary>
-        /// Saves the workbook to an Excel (.xlsx) file on disk.
+        /// Saves the workbook to an Excel (.xlsx) file on disk atomically.
         /// </summary>
         public void Save(string filePath)
         {
-            using var stream = ExcelWriter.CreateFile(filePath);
-            Save(stream);
+            AtomicFileWriter.Write(filePath, Save);
         }
 
         /// <summary>
@@ -275,7 +284,7 @@ namespace ZeroDocuments.Excel
                 specs[i] = _sheets[i].ToSpec();
             }
 
-            XlsxPackageWriter.Write(stream, specs, FormulaInjectionProtection);
+            XlsxPackageWriter.Write(stream, specs, FormulaInjection);
         }
 
         /// <summary>

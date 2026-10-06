@@ -144,13 +144,13 @@ namespace ZeroDocuments.Tests
         [Fact]
         public void CsvMalformation_NullBytesAndControlCharacters_ShouldPreserveContent()
         {
-            string csvWithControlChars = "ColA,ColB\r\n\"Line\0WithNull\",\"Control\x01\x02Chars\"";
+            string csvWithControlChars = "ColA,ColB\r\n\"Line\0WithNull\",\"Control\u0001\u0002Chars\"";
             using var ms = new MemoryStream(Encoding.UTF8.GetBytes(csvWithControlChars));
 
             var table = CsvReader.ReadToDataTable(ms);
             Assert.Single(table.Rows);
             Assert.Contains("\0", table.Rows[0]["ColA"]?.ToString());
-            Assert.Contains("\x01\x02", table.Rows[0]["ColB"]?.ToString());
+            Assert.Contains("\u0001\u0002", table.Rows[0]["ColB"]?.ToString());
         }
     }
 }

@@ -1,10 +1,10 @@
 # ZeroDocuments
 
 [![ZeroPlatform Tier](https://img.shields.io/badge/ZeroPlatform-Tier%205%20(Presentation%20%26%20Apps)-e11d48.svg)](https://github.com/kzxl/ZeroPlatform)
-[![NuGet Version](https://img.shields.io/badge/nuget-v1.4.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
+[![NuGet Version](https://img.shields.io/badge/nuget-v1.5.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
-[![Tests: 119 Passed](https://img.shields.io/badge/Tests-119%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests: 130 Passed](https://img.shields.io/badge/Tests-130%20Passed%20(100%25)-brightgreen.svg)]()
 [![Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-orange.svg)]()
 
 > **Architectural Standard**: 100% Pure C# BCL, Zero External Dependencies (No EPPlus, ClosedXML, or DevExpress), Multi-Targeting across `.NET 8.0`, `.NET Framework 4.6.2`, and `.NET Standard 2.0`.
@@ -17,11 +17,12 @@
 
 | Feature | Legacy Libraries (EPPlus, ClosedXML) | DevExpress Spreadsheet | ZeroDocuments |
 | :--- | :--- | :--- | :--- |
-| **Dependencies** | 5 – 15 transitive packages | Heavy proprietary DLLs (~40MB+) | **0 External Dependencies** (BCL only) |
+| **Dependencies** | 5 – 15 transitive packages | Heavy proprietary DLLs (~40MB+) | **0 External Dependencies** (Pure BCL) |
 | **License** | Commercial / PolyForm / AGPL | Commercial (Per-Developer License) | **MIT License** (Free & Open Source) |
 | **Publish Size** | +15MB – 30MB | +40MB – 80MB | **< 100 KB** |
 | **Memory Footprint** | Heavy DOM Tree (>200MB on 100k rows) | Heavy UI/DOM model | **Streaming XmlReader (&lt; 15MB RAM)** |
-| **Security** | Vulnerable to CSV Injection if unescaped | Depends on implementation | **CWE-1236 Formula Guard Built-in** |
+| **Security** | Vulnerable to CSV Injection if unescaped | Depends on implementation | **CWE-1236 Guard & CWE-409 Zip Bomb Guard** |
+| **Reliability** | Direct file overwrite (can corrupt on abort)| Direct file overwrite | **Atomic File Writes (`AtomicFileWriter`)** |
 | **.NET 4.6.2 Compatibility**| Prone to `System.IO.Compression` binding issues | Complex assembly deployment | **Native Auto-Resolver built-in** |
 
 ---
@@ -39,19 +40,24 @@ ZeroDocuments.Core
  │    │    ├── XlsxPackageWriter.cs      # Single OPC/SpreadsheetML generator shared by Writer & Builder
  │    │    ├── XlsxPackageReader.cs      # OPC relationship resolution, shared strings, date-style detection
  │    │    ├── OADateFormatter.cs        # OLE Automation serial <-> ISO date conversion (1900 & 1904 systems)
- │    │    └── SpreadsheetXml.cs         # Hardened XmlReader/XmlWriter factories, sanitizers, column-name cache
+ │    │    └── SpreadsheetXml.cs         # Hardened XmlReader/XmlWriter factories, sanitizers, ST_Xstring decoder
  │    └── Models/
- │         ├── ExcelCellAddress.cs       # Coordinate calculations (e.g., "D24" -> Col 4, Row 24)
+ │         ├── ExcelCellAddress.cs       # Coordinate calculations (e.g., "$D$24", "A:C", "1:5")
  │         ├── ExcelRow.cs               # Column-indexed lightweight row model
- │         └── ExcelCell.cs              # Typed cell value container
+ │         ├── ExcelCell.cs              # Typed cell value container
+ │         ├── ExcelWriterOptions.cs     # Per-call thread-safe writer options
+ │         └── ExcelReaderOptions.cs     # Per-call reader options & decompression limit guards
  ├── Csv/
  │    ├── CsvReader.cs                   # Buffered RFC 4180 streaming parser with delimiter flexibility
- │    └── CsvWriter.cs                   # Streaming DataTable & typed collection CSV generator with CWE-1236 guard
+ │    ├── CsvWriter.cs                   # Streaming DataTable & typed collection CSV generator (Invariant culture)
+ │    └── CsvWriterOptions.cs            # Per-call thread-safe CSV writer options
  └── Common/
       ├── PropertyAccessorCache.cs       # Compiled Expression Trees for 30x-50x faster POCO mapping
       ├── ValueConverter.cs              # Culture-invariant, Excel-tolerant text -> CLR type conversion
       ├── TabularSource.cs               # Lazy DataTable / POCO row adapters
       ├── FormulaInjectionGuard.cs       # Single source of truth for CWE-1236 mitigation
+      ├── FormulaInjectionMode.cs        # Formula injection modes: PrefixQuote, QuotePrefixStyle, Disabled
+      ├── AtomicFileWriter.cs            # Crash-resilient atomic file writes via sibling temp files
       └── RuntimeAssemblyResolver.cs     # Self-healing assembly binder for .NET Framework runtimes
 ```
 
@@ -62,14 +68,21 @@ ZeroDocuments.Core
 ### 1. Low-Memory Streaming Excel Reader (`ExcelReader`)
 - **Single-Pass Streaming (`StreamRows`)**: One forward-only `XmlReader` per sheet (no per-row subtree readers); ~4x fewer allocations than v1.3.
 - **Compiled POCO Mapping (`Read<T>`)**: Maps worksheets directly into strongly-typed DTOs (classes or structs) via compiled Expression Trees; tolerant of Excel artifacts (`"15.0"` → `int`, `"1E-3"` → `decimal`, OLE serial → `DateTime`).
-- **Header-Bounded Range Parsing**: Read data bounded by a specific header range (e.g. `D24:T24`), with column names taken from the header row (`ReadWithHeaders`).
+- **Header-Bounded & Advanced Range Parsing**: Bounded parsing (`D24:T24`), absolute references (`$A$1:$D$50`), full columns (`A:C`), and full rows (`1:5`). Default unbounded range (`A1:XFD1048576`) dynamically trims empty trailing columns.
+- **Sheet Inspection**: Query workbook sheet metadata without full decompression via `ExcelReader.GetSheetNames`.
+- **Zip-Bomb Decompression Guard (CWE-409)**: Enforces `MaxUncompressedEntryBytes` via `BoundedReadStream` on XML entry streams, preventing decompression denial-of-service.
 - **Real Date Semantics**: Date-formatted numeric cells (built-in and custom formats, 1900 and 1904 systems) are returned as ISO text (`yyyy-MM-dd[ HH:mm:ss]`).
-- **Third-Party Package Compatibility**: OPC relationship resolution (absolute / `../` targets, tab order), implicit row/cell references, rich text, phonetic-run exclusion.
+- **Third-Party Package Compatibility**: OPC relationship resolution (absolute / `../` targets, tab order), implicit row/cell references, rich text, phonetic-run exclusion, and ECMA-376 ST_Xstring escape decoding (`_x000D_`, `_x005F_`).
 
-### 2. Fluent Multi-Sheet Workbook Builder (`ZeroExcel`)
+### 2. Fluent Multi-Sheet Workbook Builder (`ZeroExcel`) & `ExcelWriter`
 - **Multi-Sheet Support**: Add multiple sheets with custom names, data sources (DataTables, POCOs, 2D grids), and header styling (Bold, border layout).
 - **Native Excel Dates**: `DateTime` values are written as real date cells (`yyyy-mm-dd` / `yyyy-mm-dd hh:mm:ss`), sortable and filterable in Excel.
-- **Formula Injection Mitigation (CWE-1236)**: Automatically neutralizes malicious formula payloads (`=`, `+`, `-`, `@`) to protect downstream users.
+- **Formula Injection Mitigation (CWE-1236)**:
+  - `QuotePrefixStyle` (Recommended): Uses OpenXML `quotePrefix="1"` cell styling so Excel renders formulas starting with `=`, `+`, `-`, `@` as plain text without modifying or prepending physical quotes to raw data.
+  - `PrefixQuote`: Prepends single quote `'` character to string data.
+  - `Disabled`: Preserves raw formulas for downstream evaluation.
+- **Crash-Resilient Atomic File Writes (`AtomicFileWriter`)**: Writes to a sibling `.tmp` file and atomically commits via `File.Replace` / `File.Move`, ensuring existing files remain intact during application crashes or interruptions.
+- **Native Excel AutoFilter**: Emits both `<autoFilter>` markup and native Excel `_xlnm._FilterDatabase` defined names in `workbook.xml`.
 - **Schema-Valid Output**: Generated packages validate with 0 errors against the Office 2019 OpenXML schema (sheet names, colors, NaN/Infinity, CR/LF all sanitized).
 - **Direct Memory & File Export**: Save to file, stream, or byte array (`ToArray()`).
 
@@ -78,7 +91,9 @@ ZeroDocuments.Core
 
 ### 4. RFC 4180 CSV Engine (`CsvReader` & `CsvWriter`)
 - **Flexible Delimiters**: Support for comma (`,`), semicolon (`;`), tab (`\t`), and custom delimiters.
+- **Culture-Invariant Formatting**: Numbers, decimals, floating points, booleans, and dates are serialized strictly under `CultureInfo.InvariantCulture`, preventing locale-dependent corruption (e.g. comma decimal separator).
 - **CWE-1236 Guard**: Prevents CSV injection attacks by prefixing dangerous trigger characters in text fields with single quotes (typed numbers such as `-5` are never altered).
+- **Atomic Writes**: Writes to temporary file before replacing destination file.
 
 ### 5. Self-Healing Runtime Assembly Resolver (`RuntimeAssemblyResolver`)
 - Automatically resolves `.NET Framework 4.6.2` assembly binding redirects for `System.IO.Compression`.
@@ -91,6 +106,7 @@ ZeroDocuments.Core
 - **Cell Highlight Rules**: Highlight cells matching conditions (GreaterThan, LessThan, Equal, Between) with custom ARGB background fills and bold fonts via OpenXML DXF styles.
 - **Color Scales & Data Bars**: Generate 2-color / 3-color gradient heatmaps and horizontal data bars.
 - **AutoFilter**: One-line automatic header filtering (`SetAutoFilter`).
+
 
 ---
 
@@ -196,6 +212,30 @@ workbook.AddSheet("KPI", salesData, headers: new[] { "Region", "Sales", "Target"
         .Save("KpiDashboard.xlsx");
 ```
 
+### 8. Advanced Writer & Reader Options (v1.5.0)
+```csharp
+using ZeroDocuments.Common;
+using ZeroDocuments.Excel;
+using ZeroDocuments.Excel.Models;
+
+// 1. Non-destructive formula injection mitigation (OpenXML quotePrefix style)
+var writerOptions = new ExcelWriterOptions
+{
+    FormulaInjection = FormulaInjectionMode.QuotePrefixStyle // keeps "=SUM(A1)" as text without writing "'"
+};
+ExcelWriter.WriteToFile("CleanData.xlsx", dataTable, "Sheet1", options: writerOptions);
+
+// 2. Query sheet names without decompressing full worksheets
+List<string> sheetNames = ExcelReader.GetSheetNames("CleanData.xlsx");
+
+// 3. Hardened decompression limits against zip bombs (CWE-409)
+var readerOptions = new ExcelReaderOptions
+{
+    MaxUncompressedEntryBytes = 100 * 1024 * 1024 // 100 MB limit per entry
+};
+DataTable data = ExcelReader.ReadToDataTable("Untrusted.xlsx", options: readerOptions);
+```
+
 ---
 
 ## 💻 Supported Platforms
@@ -210,24 +250,14 @@ workbook.AddSheet("KPI", salesData, headers: new[] { "Region", "Sales", "Target"
 
 ## 🏛️ Ecosystem Architectural Alignment
 
-ZeroDocuments is a sovereign member of **Tier 5 (Presentation & Orchestration)** within the **ZeroPlatform** industrial automation ecosystem.
+ZeroDocuments is a sovereign, self-contained component of **Tier 5 (Presentation & Orchestration)** within the **ZeroPlatform** industrial automation ecosystem.
 
-```
-┌──────────────────────────────────────────────────────────┐
-│ Tier 5: Presentation & Orchestration (ZeroDocuments)    │
-└────────────────────────────┬─────────────────────────────┘
-                             │ consumes
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│ Tier 0: Primitives & Memory (ZeroPrimitives.Core 1.7.0)  │
-└──────────────────────────────────────────────────────────┘
-```
-
-- **Upstream Ingestion**: Consumes Tier 0 foundational abstractions (`ZeroPrimitives.Core 1.7.0`).
-- **Strict DAG Conformance**: Zero references to parallel presentation or higher layers.
+- **100% Pure BCL Sovereign Footprint**: Zero external dependencies (no EPPlus, ClosedXML, or third-party DLLs), guaranteeing maximum portability, zero supply-chain risk, and instant deployment across ERP and Edge nodes.
+- **Strict DAG Conformance**: Independent component with zero cross-tier circularity.
 - **Packaging & CI/CD**: Standardized under `Company = ZeroPlatform`, `Authors = Phong Võ`, `<ZeroTier>5</ZeroTier>`.
 
 ---
 
 ## 📄 License
 MIT License © 2026 Phong Võ (`kzxl`). Part of the **ZeroPlatform** sovereign ecosystem.
+

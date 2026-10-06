@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Compression;
 using System.Text;
 using System.Xml;
+using ZeroDocuments.Excel.Models;
 
 namespace ZeroDocuments.Excel.Internal
 {
@@ -17,6 +19,7 @@ namespace ZeroDocuments.Excel.Internal
         private readonly Dictionary<string, ZipArchiveEntry> _entries;
         private readonly List<SheetInfo> _sheets = new List<SheetInfo>();
         private readonly string _workbookPath;
+        private readonly ExcelReaderOptions _options;
         private string? _sharedStringsPath;
         private string? _stylesPath;
 
@@ -33,8 +36,9 @@ namespace ZeroDocuments.Excel.Internal
         /// <summary>Sheets in workbook (tab) order.</summary>
         public IReadOnlyList<SheetInfo> Sheets => _sheets;
 
-        private XlsxPackageReader(ZipArchive zip)
+        private XlsxPackageReader(ZipArchive zip, ExcelReaderOptions? options = null)
         {
+            _options = options ?? new ExcelReaderOptions();
             _entries = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in zip.Entries)
             {
@@ -46,7 +50,26 @@ namespace ZeroDocuments.Excel.Internal
             LoadWorkbook();
         }
 
-        public static XlsxPackageReader Open(ZipArchive zip) => new XlsxPackageReader(zip);
+        public static XlsxPackageReader Open(ZipArchive zip, ExcelReaderOptions? options = null) =>
+            new XlsxPackageReader(zip, options);
+
+        public Stream OpenEntryStream(ZipArchiveEntry entry)
+        {
+            if (entry == null) throw new ArgumentNullException(nameof(entry));
+
+            if (_options.MaxUncompressedEntryBytes > 0 && entry.Length > _options.MaxUncompressedEntryBytes)
+            {
+                throw new InvalidDataException(
+                    $"Entry '{entry.FullName}' uncompressed size ({entry.Length} bytes) exceeds the maximum allowed limit of {_options.MaxUncompressedEntryBytes} bytes.");
+            }
+
+            var stream = entry.Open();
+            if (_options.MaxUncompressedEntryBytes > 0)
+            {
+                return new BoundedReadStream(stream, _options.MaxUncompressedEntryBytes, entry.FullName);
+            }
+            return stream;
+        }
 
         public ZipArchiveEntry? GetEntry(string path) =>
             _entries.TryGetValue(NormalizePath(path), out var entry) ? entry : null;
@@ -114,7 +137,7 @@ namespace ZeroDocuments.Excel.Internal
 
             var pendingRelIds = new List<string?>();
 
-            using (var stream = workbookEntry.Open())
+            using (var stream = OpenEntryStream(workbookEntry))
             using (var reader = SpreadsheetXml.CreateReader(stream))
             {
                 while (reader.Read())
@@ -204,7 +227,7 @@ namespace ZeroDocuments.Excel.Internal
             var entry = GetEntry(relsPath);
             if (entry == null) return result;
 
-            using var stream = entry.Open();
+            using var stream = OpenEntryStream(entry);
             using var reader = SpreadsheetXml.CreateReader(stream);
             while (reader.Read())
             {
@@ -286,7 +309,7 @@ namespace ZeroDocuments.Excel.Internal
                         ?? GetEntry("xl/sharedStrings.xml");
             if (entry == null) return list;
 
-            using var stream = entry.Open();
+            using var stream = OpenEntryStream(entry);
             using var reader = SpreadsheetXml.CreateReader(stream);
 
             var sb = new StringBuilder();
@@ -333,7 +356,7 @@ namespace ZeroDocuments.Excel.Internal
                 {
                     if (reader.LocalName == "t")
                     {
-                        sb.Append(reader.ReadElementContentAsString());
+                        sb.Append(SpreadsheetXml.DecodeXString(reader.ReadElementContentAsString()));
                         continue;
                     }
                     if (reader.LocalName == "rPh" || reader.LocalName == "phoneticPr" || reader.LocalName == "extLst")
@@ -362,7 +385,7 @@ namespace ZeroDocuments.Excel.Internal
             var customFormats = new Dictionary<int, string>();
             var xfFormatIds = new List<int>();
 
-            using (var stream = entry.Open())
+            using (var stream = OpenEntryStream(entry))
             using (var reader = SpreadsheetXml.CreateReader(stream))
             {
                 bool inNumFmts = false;
@@ -474,6 +497,61 @@ namespace ZeroDocuments.Excel.Internal
             }
 
             return false;
+        }
+
+        #endregion
+
+        #region Bounded Stream
+
+        private sealed class BoundedReadStream : Stream
+        {
+            private readonly Stream _inner;
+            private readonly long _maxBytes;
+            private readonly string _entryName;
+            private long _bytesRead;
+
+            public BoundedReadStream(Stream inner, long maxBytes, string entryName)
+            {
+                _inner = inner;
+                _maxBytes = maxBytes;
+                _entryName = entryName;
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                int read = _inner.Read(buffer, offset, count);
+                if (read > 0)
+                {
+                    _bytesRead += read;
+                    if (_bytesRead > _maxBytes)
+                    {
+                        throw new InvalidDataException(
+                            $"ZIP entry '{_entryName}' decompressed data exceeded the limit of {_maxBytes:N0} bytes (possible decompression bomb).");
+                    }
+                }
+                return read;
+            }
+
+            public override bool CanRead => _inner.CanRead;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => _inner.Length;
+            public override long Position
+            {
+                get => _inner.Position;
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush() => _inner.Flush();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) _inner.Dispose();
+                base.Dispose(disposing);
+            }
         }
 
         #endregion

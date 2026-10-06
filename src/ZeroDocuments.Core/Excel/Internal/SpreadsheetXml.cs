@@ -227,5 +227,63 @@ namespace ZeroDocuments.Excel.Internal
 
         /// <summary>All image extensions declared as defaults in [Content_Types].xml.</summary>
         public static readonly string[] SupportedImageExtensions = { "png", "jpg", "jpeg", "gif", "bmp", "tif", "tiff", "emf", "wmf" };
+
+        /// <summary>
+        /// Decodes ECMA-376 ST_Xstring escape sequences (_xHHHH_) and unescapes _x005F_.
+        /// Fast path: returns the original instance (zero allocation) when no "_x" sequence exists.
+        /// </summary>
+        public static string DecodeXString(string? text)
+        {
+            if (string.IsNullOrEmpty(text)) return string.Empty;
+
+            int idx = text!.IndexOf("_x", StringComparison.Ordinal);
+            if (idx < 0) return text;
+
+            var sb = new StringBuilder(text.Length);
+            for (int i = 0; i < text.Length; i++)
+            {
+                if (i + 6 < text.Length && text[i] == '_' && text[i + 1] == 'x' && text[i + 6] == '_')
+                {
+                    if (IsHexChar(text[i + 2]) && IsHexChar(text[i + 3]) &&
+                        IsHexChar(text[i + 4]) && IsHexChar(text[i + 5]))
+                    {
+                        int code = (HexVal(text[i + 2]) << 12) |
+                                   (HexVal(text[i + 3]) << 8) |
+                                   (HexVal(text[i + 4]) << 4) |
+                                   HexVal(text[i + 5]);
+
+                        // Check for literal escape: _x005F_ followed by another _xHHHH_
+                        if (code == 0x005F && i + 13 < text.Length &&
+                            text[i + 7] == '_' && text[i + 8] == 'x' && text[i + 13] == '_' &&
+                            IsHexChar(text[i + 9]) && IsHexChar(text[i + 10]) &&
+                            IsHexChar(text[i + 11]) && IsHexChar(text[i + 12]))
+                        {
+                            sb.Append('_');
+                            i += 6;
+                            continue;
+                        }
+
+                        sb.Append((char)code);
+                        i += 6;
+                        continue;
+                    }
+                }
+
+                sb.Append(text[i]);
+            }
+
+            return sb.ToString();
+        }
+
+        private static bool IsHexChar(char c) =>
+            (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+
+        private static int HexVal(char c)
+        {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            return 0;
+        }
     }
 }

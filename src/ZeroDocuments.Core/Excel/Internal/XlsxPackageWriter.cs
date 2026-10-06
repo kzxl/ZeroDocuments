@@ -23,6 +23,7 @@ namespace ZeroDocuments.Excel.Internal
         public bool AutoFilterEnabled { get; set; }
         public IReadOnlyList<ExcelImage> Images { get; set; } = Array.Empty<ExcelImage>();
         public IReadOnlyList<ExcelConditionalFormatRule> ConditionalFormatting { get; set; } = Array.Empty<ExcelConditionalFormatRule>();
+        public string? ResolvedAutoFilterRange { get; set; }
     }
 
     /// <summary>
@@ -35,6 +36,8 @@ namespace ZeroDocuments.Excel.Internal
         private const int StyleHeaderBold = 1;
         private const int StyleDate = 2;
         private const int StyleDateTime = 3;
+        private const int StyleQuotePrefix = 4;
+        private const int StyleHeaderBoldQuotePrefix = 5;
 
         private const int NumFmtDate = 164;
         private const int NumFmtDateTime = 165;
@@ -47,7 +50,7 @@ namespace ZeroDocuments.Excel.Internal
 
         private const long EmuPerPixel = 9525L;
 
-        public static void Write(Stream stream, IReadOnlyList<WorksheetSpec> sheets, bool formulaInjectionProtection)
+        public static void Write(Stream stream, IReadOnlyList<WorksheetSpec> sheets, FormulaInjectionMode formulaInjection)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (sheets == null || sheets.Count == 0) throw new ArgumentException("At least one worksheet is required.", nameof(sheets));
@@ -58,7 +61,6 @@ namespace ZeroDocuments.Excel.Internal
 
             WriteContentTypes(zip, sheets);
             WriteGlobalRels(zip);
-            WriteWorkbook(zip, sheets);
             WriteWorkbookRels(zip, sheets.Count);
             WriteStyles(zip, dxfs);
 
@@ -68,7 +70,7 @@ namespace ZeroDocuments.Excel.Internal
                 int sheetIndex = i + 1;
                 var sheet = sheets[i];
 
-                WriteWorksheet(zip, sheetIndex, sheet, dxfs, formulaInjectionProtection);
+                WriteWorksheet(zip, sheetIndex, sheet, dxfs, formulaInjection);
 
                 if (sheet.Images.Count > 0)
                 {
@@ -77,7 +79,13 @@ namespace ZeroDocuments.Excel.Internal
                     WriteDrawingRelsAndMedia(zip, sheetIndex, sheet.Images, ref globalImageIndex);
                 }
             }
+
+            // Write workbook after worksheets so resolved auto-filter ranges are populated
+            WriteWorkbook(zip, sheets);
         }
+
+        public static void Write(Stream stream, IReadOnlyList<WorksheetSpec> sheets, bool formulaInjectionProtection) =>
+            Write(stream, sheets, formulaInjectionProtection ? FormulaInjectionMode.PrefixQuote : FormulaInjectionMode.Disabled);
 
         #region OPC Parts
 
@@ -172,6 +180,36 @@ namespace ZeroDocuments.Excel.Internal
             }
             writer.WriteEndElement(); // sheets
 
+            bool hasAutoFilter = false;
+            for (int i = 0; i < sheets.Count; i++)
+            {
+                if (!string.IsNullOrEmpty(sheets[i].ResolvedAutoFilterRange))
+                {
+                    hasAutoFilter = true;
+                    break;
+                }
+            }
+
+            if (hasAutoFilter)
+            {
+                writer.WriteStartElement("definedNames");
+                for (int i = 0; i < sheets.Count; i++)
+                {
+                    string? filterRef = sheets[i].ResolvedAutoFilterRange;
+                    if (!string.IsNullOrEmpty(filterRef))
+                    {
+                        ExcelCellAddress.ParseCellRange(filterRef, out var c1, out var r1, out var c2, out var r2);
+                        writer.WriteStartElement("definedName");
+                        writer.WriteAttributeString("name", "_xlnm._FilterDatabase");
+                        writer.WriteAttributeString("localSheetId", i.ToString(CultureInfo.InvariantCulture));
+                        writer.WriteAttributeString("hidden", "1");
+                        writer.WriteString($"'{sheets[i].Name.Replace("'", "''")}'!${c1}${r1}:${c2}${r2}");
+                        writer.WriteEndElement();
+                    }
+                }
+                writer.WriteEndElement(); // definedNames
+            }
+
             writer.WriteEndElement(); // workbook
             writer.WriteEndDocument();
         }
@@ -250,11 +288,13 @@ namespace ZeroDocuments.Excel.Internal
 
             // cellXfs (indices must match Style* constants)
             writer.WriteStartElement("cellXfs");
-            writer.WriteAttributeString("count", "4");
+            writer.WriteAttributeString("count", "6");
             WriteCellXf(writer, numFmtId: 0, fontId: 0);
             WriteCellXf(writer, numFmtId: 0, fontId: 1);
             WriteCellXf(writer, numFmtId: NumFmtDate, fontId: 0);
             WriteCellXf(writer, numFmtId: NumFmtDateTime, fontId: 0);
+            WriteCellXf(writer, numFmtId: 0, fontId: 0, quotePrefix: true);
+            WriteCellXf(writer, numFmtId: 0, fontId: 1, quotePrefix: true);
             writer.WriteEndElement();
 
             // cellStyles
@@ -307,7 +347,7 @@ namespace ZeroDocuments.Excel.Internal
             writer.WriteEndElement();
         }
 
-        private static void WriteCellXf(XmlWriter writer, int numFmtId, int fontId)
+        private static void WriteCellXf(XmlWriter writer, int numFmtId, int fontId, bool quotePrefix = false)
         {
             writer.WriteStartElement("xf");
             writer.WriteAttributeString("numFmtId", numFmtId.ToString(CultureInfo.InvariantCulture));
@@ -317,6 +357,7 @@ namespace ZeroDocuments.Excel.Internal
             writer.WriteAttributeString("xfId", "0");
             if (fontId != 0) writer.WriteAttributeString("applyFont", "1");
             if (numFmtId != 0) writer.WriteAttributeString("applyNumberFormat", "1");
+            if (quotePrefix) writer.WriteAttributeString("quotePrefix", "1");
             writer.WriteEndElement();
         }
 
@@ -369,7 +410,7 @@ namespace ZeroDocuments.Excel.Internal
 
         #region Worksheet
 
-        private static void WriteWorksheet(ZipArchive zip, int sheetIndex, WorksheetSpec sheet, List<DxfStyle> dxfs, bool guard)
+        private static void WriteWorksheet(ZipArchive zip, int sheetIndex, WorksheetSpec sheet, List<DxfStyle> dxfs, FormulaInjectionMode mode)
         {
             var entry = zip.CreateEntry($"xl/worksheets/sheet{sheetIndex}.xml", CompressionLevel.Fastest);
             using var stream = entry.Open();
@@ -396,7 +437,7 @@ namespace ZeroDocuments.Excel.Internal
                 for (int col = 0; col < sheet.Headers.Count; col++)
                 {
                     string cellRef = SpreadsheetXml.GetColumnName(col + 1) + rowText;
-                    WriteInlineString(writer, cellRef, sheet.Headers[col], guard, headerStyle);
+                    WriteInlineString(writer, cellRef, sheet.Headers[col], mode, headerStyle);
                 }
 
                 writer.WriteEndElement(); // row
@@ -429,7 +470,7 @@ namespace ZeroDocuments.Excel.Internal
                     if (val == null || val is DBNull) continue;
 
                     string cellRef = SpreadsheetXml.GetColumnName(col + 1) + rowText;
-                    WriteCellValue(writer, cellRef, val, guard);
+                    WriteCellValue(writer, cellRef, val, mode);
                 }
 
                 writer.WriteEndElement(); // row
@@ -442,6 +483,7 @@ namespace ZeroDocuments.Excel.Internal
             // 3. AutoFilter
             if (!string.IsNullOrEmpty(sheet.AutoFilterRange))
             {
+                sheet.ResolvedAutoFilterRange = sheet.AutoFilterRange;
                 writer.WriteStartElement("autoFilter");
                 writer.WriteAttributeString("ref", sheet.AutoFilterRange);
                 writer.WriteEndElement();
@@ -449,8 +491,9 @@ namespace ZeroDocuments.Excel.Internal
             else if (sheet.AutoFilterEnabled && sheet.Headers != null && sheet.Headers.Count > 0)
             {
                 string lastCol = SpreadsheetXml.GetColumnName(sheet.Headers.Count);
+                sheet.ResolvedAutoFilterRange = $"A1:{lastCol}{lastRowIndex.ToString(CultureInfo.InvariantCulture)}";
                 writer.WriteStartElement("autoFilter");
-                writer.WriteAttributeString("ref", $"A1:{lastCol}{lastRowIndex.ToString(CultureInfo.InvariantCulture)}");
+                writer.WriteAttributeString("ref", sheet.ResolvedAutoFilterRange);
                 writer.WriteEndElement();
             }
 
@@ -591,12 +634,12 @@ namespace ZeroDocuments.Excel.Internal
         /// Writes a typed cell. Numbers and booleans are written natively; DateTime is written as an
         /// OLE Automation serial with an ISO date/datetime number format so Excel treats it as a real date.
         /// </summary>
-        internal static void WriteCellValue(XmlWriter writer, string cellRef, object val, bool guard)
+        internal static void WriteCellValue(XmlWriter writer, string cellRef, object val, FormulaInjectionMode mode)
         {
             switch (val)
             {
                 case string s:
-                    WriteInlineString(writer, cellRef, s, guard, StyleDefault);
+                    WriteInlineString(writer, cellRef, s, mode, StyleDefault);
                     break;
 
                 case bool b:
@@ -609,7 +652,7 @@ namespace ZeroDocuments.Excel.Internal
 
                 case float f:
                     if (float.IsNaN(f) || float.IsInfinity(f))
-                        WriteInlineString(writer, cellRef, f.ToString("R", CultureInfo.InvariantCulture), guard: false, StyleDefault);
+                        WriteInlineString(writer, cellRef, f.ToString("R", CultureInfo.InvariantCulture), FormulaInjectionMode.Disabled, StyleDefault);
                     else
                         WriteRawCell(writer, cellRef, null, StyleDefault, f.ToString("R", CultureInfo.InvariantCulture));
                     break;
@@ -617,7 +660,7 @@ namespace ZeroDocuments.Excel.Internal
                 case double d:
                     // NaN/Infinity are not valid xsd:double cell values in SpreadsheetML and trigger Excel's repair dialog.
                     if (double.IsNaN(d) || double.IsInfinity(d))
-                        WriteInlineString(writer, cellRef, d.ToString("R", CultureInfo.InvariantCulture), guard: false, StyleDefault);
+                        WriteInlineString(writer, cellRef, d.ToString("R", CultureInfo.InvariantCulture), FormulaInjectionMode.Disabled, StyleDefault);
                     else
                         WriteRawCell(writer, cellRef, null, StyleDefault, d.ToString("R", CultureInfo.InvariantCulture));
                     break;
@@ -634,20 +677,20 @@ namespace ZeroDocuments.Excel.Internal
                     }
                     else
                     {
-                        WriteInlineString(writer, cellRef, OADateFormatter.FormatIso(dt), guard, StyleDefault);
+                        WriteInlineString(writer, cellRef, OADateFormatter.FormatIso(dt), mode, StyleDefault);
                     }
                     break;
 
                 case DateTimeOffset dto:
-                    WriteInlineString(writer, cellRef, dto.ToString("yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture), guard, StyleDefault);
+                    WriteInlineString(writer, cellRef, dto.ToString("yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture), mode, StyleDefault);
                     break;
 
                 case IFormattable formattable:
-                    WriteInlineString(writer, cellRef, formattable.ToString(null, CultureInfo.InvariantCulture), guard, StyleDefault);
+                    WriteInlineString(writer, cellRef, formattable.ToString(null, CultureInfo.InvariantCulture), mode, StyleDefault);
                     break;
 
                 default:
-                    WriteInlineString(writer, cellRef, val.ToString() ?? string.Empty, guard, StyleDefault);
+                    WriteInlineString(writer, cellRef, val.ToString() ?? string.Empty, mode, StyleDefault);
                     break;
             }
         }
@@ -662,10 +705,24 @@ namespace ZeroDocuments.Excel.Internal
             writer.WriteEndElement();
         }
 
-        internal static void WriteInlineString(XmlWriter writer, string cellRef, string? rawText, bool guard, int styleIndex)
+        internal static void WriteInlineString(XmlWriter writer, string cellRef, string? rawText, FormulaInjectionMode mode, int baseStyle)
         {
-            string safeText = guard ? FormulaInjectionGuard.Sanitize(rawText) : (rawText ?? string.Empty);
-            string cleanText = SpreadsheetXml.SanitizeXmlText(safeText);
+            string? text = rawText;
+            int styleIndex = baseStyle;
+
+            if (mode == FormulaInjectionMode.PrefixQuote)
+            {
+                text = FormulaInjectionGuard.Sanitize(rawText);
+            }
+            else if (mode == FormulaInjectionMode.QuotePrefixStyle)
+            {
+                if (!string.IsNullOrEmpty(rawText) && FormulaInjectionGuard.IsTrigger(rawText![0]))
+                {
+                    styleIndex = baseStyle == StyleHeaderBold ? StyleHeaderBoldQuotePrefix : StyleQuotePrefix;
+                }
+            }
+
+            string cleanText = SpreadsheetXml.SanitizeXmlText(text);
 
             writer.WriteStartElement("c");
             writer.WriteAttributeString("r", cellRef);

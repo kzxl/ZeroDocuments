@@ -102,31 +102,89 @@ namespace ZeroDocuments.Excel
         /// <summary>
         /// Reads Excel file from file path into a DataTable.
         /// </summary>
-        public static DataTable ReadToDataTable(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
+        public static DataTable ReadToDataTable(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null) =>
+            ReadToDataTable(filePath, null, cellRange, sheetName);
+
+        /// <summary>
+        /// Reads Excel file from file path into a DataTable with custom reader options.
+        /// </summary>
+        public static DataTable ReadToDataTable(string filePath, ExcelReaderOptions? options, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
             EnsureFileExists(filePath);
             using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            return ReadToDataTable(stream, cellRange, sheetName);
+            return ReadToDataTable(stream, options, cellRange, sheetName);
         }
 
         /// <summary>
         /// Reads Excel stream into a DataTable. Rows are streamed directly into the table (no intermediate row list).
+        /// When using default range, only columns present in the data are created.
         /// </summary>
-        public static DataTable ReadToDataTable(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
+        public static DataTable ReadToDataTable(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null) =>
+            ReadToDataTable(stream, null, cellRange, sheetName);
+
+        /// <summary>
+        /// Reads Excel stream into a DataTable with custom reader options.
+        /// </summary>
+        public static DataTable ReadToDataTable(Stream stream, ExcelReaderOptions? options, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+
             var table = new DataTable();
-            ExcelCellAddress.ParseCellRange(cellRange, out var startCol, out _, out var endCol, out _);
-            int startColIdx = ExcelCellAddress.ColumnNameToIndex(startCol);
-            int endColIdx = ExcelCellAddress.ColumnNameToIndex(endCol);
+            bool isDefaultRange = string.IsNullOrWhiteSpace(cellRange) ||
+                                  string.Equals(cellRange, ExcelCellAddress.DefaultRange, StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(cellRange, "A1:ZZ1048576", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(cellRange, "A1:XFD1048576", StringComparison.OrdinalIgnoreCase);
 
-            for (int c = startColIdx; c <= endColIdx; c++)
+            if (!isDefaultRange)
             {
-                table.Columns.Add("Column_" + ExcelCellAddress.IndexToColumnName(c), typeof(string));
+                ExcelCellAddress.ParseCellRange(cellRange, out var startCol, out _, out var endCol, out _);
+                int startColIdx = ExcelCellAddress.ColumnNameToIndex(startCol);
+                int endColIdx = ExcelCellAddress.ColumnNameToIndex(endCol);
+
+                for (int c = startColIdx; c <= endColIdx; c++)
+                {
+                    table.Columns.Add("Column_" + ExcelCellAddress.IndexToColumnName(c), typeof(string));
+                }
+
+                foreach (var row in StreamRows(stream, cellRange, sheetName, options))
+                {
+                    AddDataRow(table, row, startColIdx, endColIdx);
+                }
             }
-
-            foreach (var row in StreamRows(stream, cellRange, sheetName))
+            else
             {
-                AddDataRow(table, row, startColIdx, endColIdx);
+                foreach (var row in StreamRows(stream, cellRange, sheetName, options))
+                {
+                    if (row.Cells.Count == 0) continue;
+
+                    int maxColInRow = 0;
+                    foreach (var col in row.Cells.Keys)
+                    {
+                        if (col > maxColInRow) maxColInRow = col;
+                    }
+
+                    while (table.Columns.Count < maxColInRow)
+                    {
+                        int nextCol = table.Columns.Count + 1;
+                        table.Columns.Add("Column_" + ExcelCellAddress.IndexToColumnName(nextCol), typeof(string));
+                    }
+
+                    var dataRow = table.NewRow();
+                    bool hasData = false;
+                    foreach (var kvp in row.Cells)
+                    {
+                        if (!string.IsNullOrEmpty(kvp.Value))
+                        {
+                            hasData = true;
+                            dataRow[kvp.Key - 1] = kvp.Value;
+                        }
+                    }
+
+                    if (hasData)
+                    {
+                        table.Rows.Add(dataRow);
+                    }
+                }
             }
 
             return table;
@@ -249,16 +307,22 @@ namespace ZeroDocuments.Excel
         /// <summary>
         /// Streams Excel rows lazily from a file. The file handle is released when enumeration completes or is disposed.
         /// </summary>
-        public static IEnumerable<ExcelRow> StreamRows(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
+        public static IEnumerable<ExcelRow> StreamRows(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null) =>
+            StreamRows(filePath, null, cellRange, sheetName);
+
+        /// <summary>
+        /// Streams Excel rows lazily from a file with custom reader options.
+        /// </summary>
+        public static IEnumerable<ExcelRow> StreamRows(string filePath, ExcelReaderOptions? options, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
             EnsureFileExists(filePath);
-            return StreamRowsFromFile(filePath, cellRange, sheetName);
+            return StreamRowsFromFile(filePath, cellRange, sheetName, options);
         }
 
-        private static IEnumerable<ExcelRow> StreamRowsFromFile(string filePath, string cellRange, string? sheetName)
+        private static IEnumerable<ExcelRow> StreamRowsFromFile(string filePath, string cellRange, string? sheetName, ExcelReaderOptions? options)
         {
             using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            foreach (var row in StreamRows(stream, cellRange, sheetName))
+            foreach (var row in StreamRows(stream, cellRange, sheetName, options))
             {
                 yield return row;
             }
@@ -269,21 +333,27 @@ namespace ZeroDocuments.Excel
         /// Date-formatted numeric cells are returned as ISO text ("yyyy-MM-dd" or "yyyy-MM-dd HH:mm:ss").
         /// Minimal RAM footprint (&lt; 15MB) for maximum scalability.
         /// </summary>
-        public static IEnumerable<ExcelRow> StreamRows(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
+        public static IEnumerable<ExcelRow> StreamRows(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null) =>
+            StreamRows(stream, cellRange, sheetName, null);
+
+        /// <summary>
+        /// Streams Excel rows lazily using a single forward-only XmlReader with custom reader options.
+        /// </summary>
+        public static IEnumerable<ExcelRow> StreamRows(Stream stream, string cellRange, string? sheetName, ExcelReaderOptions? options)
         {
             ExcelCellAddress.ParseCellRange(cellRange, out var startCol, out var startRow, out var endCol, out var endRow);
             int startColIdx = ExcelCellAddress.ColumnNameToIndex(startCol);
             int endColIdx = ExcelCellAddress.ColumnNameToIndex(endCol);
 
             using var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
-            var package = XlsxPackageReader.Open(zip);
+            var package = XlsxPackageReader.Open(zip, options);
 
             var sheetEntry = package.FindSheetEntry(sheetName);
             if (sheetEntry == null) yield break;
 
             var context = new SheetReadContext(package.LoadSharedStrings(), package.LoadDateStyleMap(), package.Date1904);
 
-            using var sheetStream = sheetEntry.Open();
+            using var sheetStream = package.OpenEntryStream(sheetEntry);
             using var reader = SpreadsheetXml.CreateReader(sheetStream);
 
             int lastRowNum = 0;
@@ -547,6 +617,32 @@ namespace ZeroDocuments.Excel
             }
 
             return images;
+        }
+
+        /// <summary>
+        /// Returns the names of all worksheets in workbook (tab) order.
+        /// </summary>
+        public static List<string> GetSheetNames(string filePath)
+        {
+            EnsureFileExists(filePath);
+            using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return GetSheetNames(stream);
+        }
+
+        /// <summary>
+        /// Returns the names of all worksheets in workbook (tab) order from a stream.
+        /// </summary>
+        public static List<string> GetSheetNames(Stream stream)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+            using var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            var package = XlsxPackageReader.Open(zip);
+            var list = new List<string>(package.Sheets.Count);
+            foreach (var s in package.Sheets)
+            {
+                list.Add(s.Name);
+            }
+            return list;
         }
 
         #endregion
