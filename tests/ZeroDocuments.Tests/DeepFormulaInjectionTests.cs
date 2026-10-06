@@ -9,6 +9,7 @@ using ZeroDocuments.Excel;
 
 namespace ZeroDocuments.Tests
 {
+    [Collection(GlobalWriterSettingsCollection.Name)]
     public class DeepFormulaInjectionTests
     {
         public static readonly string[] DangerousPayloads = new[]

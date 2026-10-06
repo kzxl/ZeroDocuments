@@ -56,10 +56,17 @@ namespace ZeroDocuments.Excel.Models
         /// <summary>
         /// Initializes a new instance of the <see cref="ExcelImage"/> class.
         /// </summary>
+        /// <exception cref="ArgumentNullException"><paramref name="data"/> is null.</exception>
+        /// <exception cref="NotSupportedException"><paramref name="format"/> is not png, jpg, jpeg, gif, bmp, tif, tiff, emf or wmf.</exception>
         public ExcelImage(byte[] data, string format, int columnIndex, int rowIndex, int widthPx, int heightPx, string? name = null)
         {
             Data = data ?? throw new ArgumentNullException(nameof(data));
             Format = string.IsNullOrWhiteSpace(format) ? "png" : format.Trim().TrimStart('.').ToLowerInvariant();
+            if (ZeroDocuments.Excel.Internal.SpreadsheetXml.GetImageContentType(Format) == null)
+            {
+                throw new NotSupportedException(
+                    $"Image format '{format}' is not supported. Use png, jpg, jpeg, gif, bmp, tif, tiff, emf or wmf.");
+            }
             ColumnIndex = Math.Max(1, columnIndex);
             RowIndex = Math.Max(1, rowIndex);
             WidthPx = Math.Max(1, widthPx);

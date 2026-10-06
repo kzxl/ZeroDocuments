@@ -87,7 +87,10 @@ namespace ZeroDocuments.Common
             var instanceParam = Expression.Parameter(typeof(object), "instance");
             var valueParam = Expression.Parameter(typeof(object), "value");
 
-            var castInstance = Expression.Convert(instanceParam, type);
+            // Value types: Unbox yields a reference into the boxed instance so the mutation is not lost on a copy.
+            Expression castInstance = type.IsValueType
+                ? Expression.Unbox(instanceParam, type)
+                : Expression.Convert(instanceParam, type);
             var castValue = Expression.Convert(valueParam, property.PropertyType);
             var call = Expression.Call(castInstance, setMethod, castValue);
 

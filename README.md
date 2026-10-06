@@ -1,10 +1,10 @@
 # ZeroDocuments
 
 [![ZeroPlatform Tier](https://img.shields.io/badge/ZeroPlatform-Tier%205%20(Presentation%20%26%20Apps)-e11d48.svg)](https://github.com/kzxl/ZeroPlatform)
-[![NuGet Version](https://img.shields.io/badge/nuget-v1.3.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
+[![NuGet Version](https://img.shields.io/badge/nuget-v1.4.0-blue.svg)](https://www.nuget.org/packages/ZeroDocuments.Core/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Zero External Dependencies](https://img.shields.io/badge/Dependencies-0%20External-brightgreen.svg)]()
-[![Tests: 91 Passed](https://img.shields.io/badge/Tests-91%20Passed%20(100%25)-brightgreen.svg)]()
+[![Tests: 119 Passed](https://img.shields.io/badge/Tests-119%20Passed%20(100%25)-brightgreen.svg)]()
 [![Multi-Targeting](https://img.shields.io/badge/.NET-8.0%20%7C%204.6.2%20%7C%20Standard%202.0-orange.svg)]()
 
 > **Architectural Standard**: 100% Pure C# BCL, Zero External Dependencies (No EPPlus, ClosedXML, or DevExpress), Multi-Targeting across `.NET 8.0`, `.NET Framework 4.6.2`, and `.NET Standard 2.0`.
@@ -32,18 +32,26 @@
 ZeroDocuments.Core
  ├── Excel/
  │    ├── ZeroExcel.cs                   # Fluent multi-sheet workbook factory
- │    ├── ExcelWorkbookBuilder.cs        # Multi-sheet OpenXML package generator with styling
- │    ├── ExcelReader.cs                 # Low-memory streaming XmlReader & POCO mapper
- │    ├── ExcelWriter.cs                 # High-speed single-sheet OpenXML exporter
+ │    ├── ExcelWorkbookBuilder.cs        # Fluent multi-sheet API (images, conditional formatting, autofilter)
+ │    ├── ExcelReader.cs                 # Single-pass streaming XmlReader & POCO mapper
+ │    ├── ExcelWriter.cs                 # Streaming single-sheet exporter (sources enumerated once, never buffered)
+ │    ├── Internal/
+ │    │    ├── XlsxPackageWriter.cs      # Single OPC/SpreadsheetML generator shared by Writer & Builder
+ │    │    ├── XlsxPackageReader.cs      # OPC relationship resolution, shared strings, date-style detection
+ │    │    ├── OADateFormatter.cs        # OLE Automation serial <-> ISO date conversion (1900 & 1904 systems)
+ │    │    └── SpreadsheetXml.cs         # Hardened XmlReader/XmlWriter factories, sanitizers, column-name cache
  │    └── Models/
  │         ├── ExcelCellAddress.cs       # Coordinate calculations (e.g., "D24" -> Col 4, Row 24)
  │         ├── ExcelRow.cs               # Column-indexed lightweight row model
  │         └── ExcelCell.cs              # Typed cell value container
  ├── Csv/
- │    ├── CsvReader.cs                   # RFC 4180 streaming CSV parser with delimiter flexibility
- │    └── CsvWriter.cs                   # Fast DataTable & typed collection CSV generator with CWE-1236 guard
+ │    ├── CsvReader.cs                   # Buffered RFC 4180 streaming parser with delimiter flexibility
+ │    └── CsvWriter.cs                   # Streaming DataTable & typed collection CSV generator with CWE-1236 guard
  └── Common/
       ├── PropertyAccessorCache.cs       # Compiled Expression Trees for 30x-50x faster POCO mapping
+      ├── ValueConverter.cs              # Culture-invariant, Excel-tolerant text -> CLR type conversion
+      ├── TabularSource.cs               # Lazy DataTable / POCO row adapters
+      ├── FormulaInjectionGuard.cs       # Single source of truth for CWE-1236 mitigation
       └── RuntimeAssemblyResolver.cs     # Self-healing assembly binder for .NET Framework runtimes
 ```
 
@@ -52,13 +60,17 @@ ZeroDocuments.Core
 ## 🌟 Key Capabilities
 
 ### 1. Low-Memory Streaming Excel Reader (`ExcelReader`)
-- **Forward-Only Streaming (`StreamRows`)**: Processes 1,000,000+ rows with **&lt; 15MB RAM** without building heavy DOM trees.
-- **Compiled POCO Mapping (`Read<T>`)**: Maps worksheets directly into strongly-typed DTOs via compiled Expression Trees without reflection lag.
-- **Header-Bounded Range Parsing**: Read data bounded by a specific header range (e.g. `D24:T24`), ideal for complex enterprise invoice and production templates.
+- **Single-Pass Streaming (`StreamRows`)**: One forward-only `XmlReader` per sheet (no per-row subtree readers); ~4x fewer allocations than v1.3.
+- **Compiled POCO Mapping (`Read<T>`)**: Maps worksheets directly into strongly-typed DTOs (classes or structs) via compiled Expression Trees; tolerant of Excel artifacts (`"15.0"` → `int`, `"1E-3"` → `decimal`, OLE serial → `DateTime`).
+- **Header-Bounded Range Parsing**: Read data bounded by a specific header range (e.g. `D24:T24`), with column names taken from the header row (`ReadWithHeaders`).
+- **Real Date Semantics**: Date-formatted numeric cells (built-in and custom formats, 1900 and 1904 systems) are returned as ISO text (`yyyy-MM-dd[ HH:mm:ss]`).
+- **Third-Party Package Compatibility**: OPC relationship resolution (absolute / `../` targets, tab order), implicit row/cell references, rich text, phonetic-run exclusion.
 
 ### 2. Fluent Multi-Sheet Workbook Builder (`ZeroExcel`)
 - **Multi-Sheet Support**: Add multiple sheets with custom names, data sources (DataTables, POCOs, 2D grids), and header styling (Bold, border layout).
+- **Native Excel Dates**: `DateTime` values are written as real date cells (`yyyy-mm-dd` / `yyyy-mm-dd hh:mm:ss`), sortable and filterable in Excel.
 - **Formula Injection Mitigation (CWE-1236)**: Automatically neutralizes malicious formula payloads (`=`, `+`, `-`, `@`) to protect downstream users.
+- **Schema-Valid Output**: Generated packages validate with 0 errors against the Office 2019 OpenXML schema (sheet names, colors, NaN/Infinity, CR/LF all sanitized).
 - **Direct Memory & File Export**: Save to file, stream, or byte array (`ToArray()`).
 
 ### 3. Compiled Expression Trees (`PropertyAccessorCache`)
@@ -66,13 +78,13 @@ ZeroDocuments.Core
 
 ### 4. RFC 4180 CSV Engine (`CsvReader` & `CsvWriter`)
 - **Flexible Delimiters**: Support for comma (`,`), semicolon (`;`), tab (`\t`), and custom delimiters.
-- **CWE-1236 Guard**: Prevents CSV injection attacks by automatically prefixing dangerous trigger characters with single quotes.
+- **CWE-1236 Guard**: Prevents CSV injection attacks by prefixing dangerous trigger characters in text fields with single quotes (typed numbers such as `-5` are never altered).
 
 ### 5. Self-Healing Runtime Assembly Resolver (`RuntimeAssemblyResolver`)
 - Automatically resolves `.NET Framework 4.6.2` assembly binding redirects for `System.IO.Compression`.
 
 ### 6. OpenXML DrawingML Image Engine (`AddImage` & `ExtractImages`)
-- **Direct Image Embedding**: Embed PNG, JPEG, and JPG images into any worksheet with precise cell anchors, pixel dimensions, and EMU coordinate scaling.
+- **Direct Image Embedding**: Embed PNG, JPEG, GIF, BMP, TIFF, EMF and WMF images into any worksheet with precise cell anchors, pixel dimensions, and EMU coordinate scaling.
 - **Embedded Media Extraction**: Extract all embedded images from existing `.xlsx` packages via `ExcelReader.ExtractImages`.
 
 ### 7. Rich Conditional Formatting & AutoFilter
@@ -88,15 +100,18 @@ ZeroDocuments.Core
 ```csharp
 using ZeroDocuments.Excel;
 
-// Read starting from header D24:T24 down to a maximum of 5,000 rows
-DataTable table = ExcelReader.ReadByHeaderRange("PurchaseOrder.xlsx", "D24:T24", maxRows: 5000);
+// Header row D24:T24 names the columns; data is read below it (max 5,000 rows).
+DataTable table = ExcelReader.ReadWithHeaders("PurchaseOrder.xlsx", "D24:T24", maxRows: 5000);
 
 foreach (DataRow row in table.Rows)
 {
     string itemCode = row["Item Code"]?.ToString() ?? "";
-    decimal quantity = Convert.ToDecimal(row["Quantity"]);
+    decimal quantity = Convert.ToDecimal(row["Quantity"], CultureInfo.InvariantCulture);
     Console.WriteLine($"Item: {itemCode} | Qty: {quantity}");
 }
+
+// Positional variant: skips the header row and names columns "Column_D" … "Column_T".
+DataTable positional = ExcelReader.ReadByHeaderRange("PurchaseOrder.xlsx", "D24:T24", maxRows: 5000);
 ```
 
 ### 2. Stream Rows from Excel File
@@ -204,11 +219,11 @@ ZeroDocuments is a sovereign member of **Tier 5 (Presentation & Orchestration)**
                              │ consumes
                              ▼
 ┌──────────────────────────────────────────────────────────┐
-│ Tier 0: Primitives & Memory (ZeroPrimitives.Core 1.3.0)  │
+│ Tier 0: Primitives & Memory (ZeroPrimitives.Core 1.7.0)  │
 └──────────────────────────────────────────────────────────┘
 ```
 
-- **Upstream Ingestion**: Consumes Tier 0 foundational abstractions (`ZeroPrimitives.Core 1.3.0`).
+- **Upstream Ingestion**: Consumes Tier 0 foundational abstractions (`ZeroPrimitives.Core 1.7.0`).
 - **Strict DAG Conformance**: Zero references to parallel presentation or higher layers.
 - **Packaging & CI/CD**: Standardized under `Company = ZeroPlatform`, `Authors = Phong Võ`, `<ZeroTier>5</ZeroTier>`.
 

@@ -73,7 +73,14 @@ namespace ZeroDocuments.Csv
 
                 while (table.Columns.Count < row.Count)
                 {
-                    table.Columns.Add($"Column_{table.Columns.Count + 1}", typeof(string));
+                    string baseName = $"Column_{table.Columns.Count + 1}";
+                    string uniqueName = baseName;
+                    int suffix = 1;
+                    while (table.Columns.Contains(uniqueName))
+                    {
+                        uniqueName = $"{baseName}_{suffix++}";
+                    }
+                    table.Columns.Add(uniqueName, typeof(string));
                 }
 
                 var rowData = new object?[table.Columns.Count];
@@ -90,94 +97,97 @@ namespace ZeroDocuments.Csv
         /// <summary>
         /// Streams parsed CSV records row by row from a TextReader.
         /// RFC 4180 compliant (handles quoted fields with delimiters, line breaks, and escaped double quotes).
+        /// A double quote opens a quoted section only at the start of a field; elsewhere it is treated literally.
         /// </summary>
         public static IEnumerable<IReadOnlyList<string>> ReadRows(TextReader reader, char delimiter = ',')
         {
             if (reader == null) throw new ArgumentNullException(nameof(reader));
+            return ReadRowsIterator(reader, delimiter);
+        }
 
+        private static IEnumerable<IReadOnlyList<string>> ReadRowsIterator(TextReader reader, char delimiter)
+        {
+            var buffer = new char[16 * 1024];
             var row = new List<string>();
-            var fieldBuilder = new StringBuilder();
+            var field = new StringBuilder();
+
             bool inQuotes = false;
+            bool quotePending = false;   // saw '"' inside quotes; next char decides escape vs. close
+            bool skipLineFeed = false;   // previous char was '\r'
+            bool fieldWasQuoted = false;
             bool isFirstChar = true;
-            int chInt;
 
-            while ((chInt = reader.Read()) != -1)
+            int length;
+            while ((length = reader.Read(buffer, 0, buffer.Length)) > 0)
             {
-                if (isFirstChar)
+                for (int i = 0; i < length; i++)
                 {
-                    isFirstChar = false;
-                    // Strip UTF-8 / Unicode BOM (U+FEFF) if present at stream start
-                    if (chInt == 0xFEFF)
+                    char ch = buffer[i];
+
+                    if (isFirstChar)
                     {
-                        continue;
+                        isFirstChar = false;
+                        // Strip UTF-8 / Unicode BOM (U+FEFF) if present at stream start
+                        if (ch == '\uFEFF') continue;
                     }
-                }
 
-                char ch = (char)chInt;
-
-                if (inQuotes)
-                {
-                    if (ch == '"')
+                    if (skipLineFeed)
                     {
-                        int next = reader.Peek();
-                        if (next == '"')
+                        skipLineFeed = false;
+                        if (ch == '\n') continue;
+                    }
+
+                    if (quotePending)
+                    {
+                        quotePending = false;
+                        if (ch == '"')
                         {
                             // Escaped quote: "" -> "
-                            reader.Read();
-                            fieldBuilder.Append('"');
+                            field.Append('"');
+                            continue;
                         }
-                        else
-                        {
-                            // Closing quote
-                            inQuotes = false;
-                        }
+                        // Closing quote; process current char as unquoted content.
+                        inQuotes = false;
                     }
-                    else
+
+                    if (inQuotes)
                     {
-                        fieldBuilder.Append(ch);
+                        if (ch == '"') quotePending = true;
+                        else field.Append(ch);
+                        continue;
                     }
-                }
-                else
-                {
-                    if (ch == '"')
+
+                    if (ch == '"' && field.Length == 0 && !fieldWasQuoted)
                     {
                         inQuotes = true;
+                        fieldWasQuoted = true;
                     }
                     else if (ch == delimiter)
                     {
-                        row.Add(fieldBuilder.ToString());
-                        fieldBuilder.Clear();
+                        row.Add(field.ToString());
+                        field.Clear();
+                        fieldWasQuoted = false;
                     }
-                    else if (ch == '\r')
+                    else if (ch == '\r' || ch == '\n')
                     {
-                        // Check for CRLF
-                        if (reader.Peek() == '\n')
-                        {
-                            reader.Read();
-                        }
-                        row.Add(fieldBuilder.ToString());
-                        fieldBuilder.Clear();
-                        yield return row.ToArray();
-                        row.Clear();
-                    }
-                    else if (ch == '\n')
-                    {
-                        row.Add(fieldBuilder.ToString());
-                        fieldBuilder.Clear();
+                        row.Add(field.ToString());
+                        field.Clear();
+                        fieldWasQuoted = false;
+                        skipLineFeed = ch == '\r';
                         yield return row.ToArray();
                         row.Clear();
                     }
                     else
                     {
-                        fieldBuilder.Append(ch);
+                        field.Append(ch);
                     }
                 }
             }
 
-            // Flush last record if not empty
-            if (fieldBuilder.Length > 0 || row.Count > 0)
+            // Flush last record if not empty (unterminated quotes at EOF are closed leniently)
+            if (field.Length > 0 || row.Count > 0 || fieldWasQuoted)
             {
-                row.Add(fieldBuilder.ToString());
+                row.Add(field.ToString());
                 yield return row.ToArray();
             }
         }

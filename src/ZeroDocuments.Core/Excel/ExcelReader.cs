@@ -4,24 +4,21 @@ using System.Data;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
-using System.Linq;
 using System.Text;
 using System.Xml;
 using ZeroDocuments.Common;
+using ZeroDocuments.Excel.Internal;
 using ZeroDocuments.Excel.Models;
 
 namespace ZeroDocuments.Excel
 {
     /// <summary>
     /// Pure C# Zero-Dependency OpenXML Excel (.xlsx) Reader.
-    /// High-performance, streaming-first architecture using forward-only XmlReader.
-    /// Operates with &lt; 15MB RAM regardless of sheet row count.
+    /// High-performance, streaming-first architecture using a single forward-only XmlReader.
+    /// Operates with &lt; 15MB RAM regardless of sheet row count (excluding the shared string table).
     /// </summary>
     public static class ExcelReader
     {
-        private const string NsMain = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-        private const string NsRelationships = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
-
         static ExcelReader()
         {
             RuntimeAssemblyResolver.EnsureInitialized();
@@ -31,7 +28,8 @@ namespace ZeroDocuments.Excel
 
         /// <summary>
         /// Reads Excel sheet into a DataTable bounded by header range (e.g. "D24:T24" or "A1:C1").
-        /// Automatically expands rows downward until data ends.
+        /// The header row itself is skipped; columns are named positionally ("Column_D", "Column_E", ...).
+        /// Use <see cref="ReadWithHeaders(string, string, int, string?)"/> to name columns from the header row.
         /// </summary>
         public static DataTable ReadByHeaderRange(string filePath, string headerRange, int maxRows = 5000, string? sheetName = null)
         {
@@ -40,21 +38,79 @@ namespace ZeroDocuments.Excel
         }
 
         /// <summary>
+        /// Reads a header-bounded table (e.g. "D24:T24") into a DataTable whose column names are taken from the header row.
+        /// Blank headers fall back to "Column_{Letter}"; duplicate headers are suffixed ("Qty", "Qty_2").
+        /// Data rows are read below the header up to <paramref name="maxRows"/> rows.
+        /// </summary>
+        public static DataTable ReadWithHeaders(string filePath, string headerRange, int maxRows = 5000, string? sheetName = null)
+        {
+            EnsureFileExists(filePath);
+            using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            return ReadWithHeaders(stream, headerRange, maxRows, sheetName);
+        }
+
+        /// <summary>
+        /// Reads a header-bounded table from a stream into a DataTable whose column names are taken from the header row.
+        /// </summary>
+        public static DataTable ReadWithHeaders(Stream stream, string headerRange, int maxRows = 5000, string? sheetName = null)
+        {
+            if (stream == null) throw new ArgumentNullException(nameof(stream));
+            if (maxRows < 0) throw new ArgumentOutOfRangeException(nameof(maxRows));
+
+            ExcelCellAddress.ParseCellRange(headerRange, out var startCol, out var headerRow, out var endCol, out _);
+            int startColIdx = ExcelCellAddress.ColumnNameToIndex(startCol);
+            int endColIdx = ExcelCellAddress.ColumnNameToIndex(endCol);
+            string range = $"{startCol}{headerRow}:{endCol}{(long)headerRow + maxRows}";
+
+            var table = new DataTable();
+            bool headersResolved = false;
+
+            foreach (var row in StreamRows(stream, range, sheetName))
+            {
+                if (!headersResolved)
+                {
+                    headersResolved = true;
+                    var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    bool isHeaderRow = row.RowNumber == headerRow;
+
+                    for (int c = startColIdx; c <= endColIdx; c++)
+                    {
+                        string? text = isHeaderRow ? row[c]?.Trim() : null;
+                        string baseName = string.IsNullOrEmpty(text) ? "Column_" + ExcelCellAddress.IndexToColumnName(c) : text!;
+                        string unique = baseName;
+                        for (int n = 2; !used.Add(unique); n++) unique = baseName + "_" + n.ToString(CultureInfo.InvariantCulture);
+                        table.Columns.Add(unique, typeof(string));
+                    }
+
+                    if (isHeaderRow) continue;
+                }
+
+                AddDataRow(table, row, startColIdx, endColIdx);
+            }
+
+            if (!headersResolved)
+            {
+                for (int c = startColIdx; c <= endColIdx; c++)
+                {
+                    table.Columns.Add("Column_" + ExcelCellAddress.IndexToColumnName(c), typeof(string));
+                }
+            }
+
+            return table;
+        }
+
+        /// <summary>
         /// Reads Excel file from file path into a DataTable.
         /// </summary>
         public static DataTable ReadToDataTable(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
-            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
-            {
-                throw new FileNotFoundException($"Excel file not found: {filePath}");
-            }
-
+            EnsureFileExists(filePath);
             using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             return ReadToDataTable(stream, cellRange, sheetName);
         }
 
         /// <summary>
-        /// Reads Excel stream into a DataTable.
+        /// Reads Excel stream into a DataTable. Rows are streamed directly into the table (no intermediate row list).
         /// </summary>
         public static DataTable ReadToDataTable(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
@@ -68,29 +124,30 @@ namespace ZeroDocuments.Excel
                 table.Columns.Add("Column_" + ExcelCellAddress.IndexToColumnName(c), typeof(string));
             }
 
-            var rows = ReadRows(stream, cellRange, sheetName);
-            foreach (var row in rows)
+            foreach (var row in StreamRows(stream, cellRange, sheetName))
             {
-                var rowVals = new object?[endColIdx - startColIdx + 1];
-                bool hasData = false;
-
-                for (int c = startColIdx; c <= endColIdx; c++)
-                {
-                    var val = row[c];
-                    if (!string.IsNullOrEmpty(val))
-                    {
-                        hasData = true;
-                    }
-                    rowVals[c - startColIdx] = val;
-                }
-
-                if (hasData)
-                {
-                    table.Rows.Add(rowVals);
-                }
+                AddDataRow(table, row, startColIdx, endColIdx);
             }
 
             return table;
+        }
+
+        private static void AddDataRow(DataTable table, ExcelRow row, int startColIdx, int endColIdx)
+        {
+            var rowVals = new object?[endColIdx - startColIdx + 1];
+            bool hasData = false;
+
+            for (int c = startColIdx; c <= endColIdx; c++)
+            {
+                var val = row[c];
+                if (!string.IsNullOrEmpty(val)) hasData = true;
+                rowVals[c - startColIdx] = val;
+            }
+
+            if (hasData)
+            {
+                table.Rows.Add(rowVals);
+            }
         }
 
         /// <summary>
@@ -104,12 +161,12 @@ namespace ZeroDocuments.Excel
 
         /// <summary>
         /// Reads an Excel stream directly into strongly-typed POCO objects using compiled PropertyAccessorCache.
+        /// The first non-empty row in the range is treated as the header row (matched case-insensitively to property names).
+        /// Values that cannot be converted to the property type are skipped.
         /// </summary>
         public static List<T> Read<T>(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null) where T : new()
         {
             var list = new List<T>();
-            var rows = ReadRows(stream, cellRange, sheetName);
-            if (rows.Count == 0) return list;
 
             var accessors = PropertyAccessorCache.GetAccessors(typeof(T));
             var accessorMap = new Dictionary<string, PropertyAccessorCache.PropertyAccessorInfo>(StringComparer.OrdinalIgnoreCase);
@@ -118,10 +175,10 @@ namespace ZeroDocuments.Excel
                 accessorMap[acc.Name] = acc;
             }
 
-            var colToAccessor = new Dictionary<int, PropertyAccessorCache.PropertyAccessorInfo>();
+            var columnBindings = new List<KeyValuePair<int, PropertyAccessorCache.PropertyAccessorInfo>>();
             bool isFirst = true;
 
-            foreach (var row in rows)
+            foreach (var row in StreamRows(stream, cellRange, sheetName))
             {
                 if (isFirst)
                 {
@@ -129,38 +186,39 @@ namespace ZeroDocuments.Excel
                     foreach (var colIdx in row.PopulatedColumns)
                     {
                         string? header = row[colIdx];
-                        if (!string.IsNullOrWhiteSpace(header) && accessorMap.TryGetValue(header!.Trim(), out var acc))
+                        if (!string.IsNullOrWhiteSpace(header) &&
+                            accessorMap.TryGetValue(header!.Trim(), out var acc) &&
+                            acc.Setter != null)
                         {
-                            colToAccessor[colIdx] = acc;
+                            columnBindings.Add(new KeyValuePair<int, PropertyAccessorCache.PropertyAccessorInfo>(colIdx, acc));
                         }
                     }
                     continue;
                 }
 
-                var item = new T();
+                // Box once so setters mutate the same instance even when T is a value type.
+                object item = new T();
                 bool assigned = false;
 
-                foreach (var kvp in colToAccessor)
+                foreach (var binding in columnBindings)
                 {
-                    string? rawVal = row[kvp.Key];
-                    if (rawVal != null && kvp.Value.Setter != null)
+                    string? rawVal = row[binding.Key];
+                    if (rawVal == null) continue;
+
+                    try
                     {
-                        try
-                        {
-                            object? converted = ConvertValue(rawVal, kvp.Value.PropertyType);
-                            kvp.Value.Setter(item, converted);
-                            assigned = true;
-                        }
-                        catch
-                        {
-                            // Ignore casting/parsing errors
-                        }
+                        binding.Value.Setter!(item, ValueConverter.Convert(rawVal, binding.Value.PropertyType));
+                        assigned = true;
+                    }
+                    catch (Exception ex) when (ex is FormatException || ex is OverflowException || ex is InvalidCastException || ex is ArgumentException)
+                    {
+                        // Unconvertible values are skipped (lenient hydration).
                     }
                 }
 
                 if (assigned)
                 {
-                    list.Add(item);
+                    list.Add((T)item);
                 }
             }
 
@@ -185,11 +243,30 @@ namespace ZeroDocuments.Excel
         /// </summary>
         public static List<ExcelRow> ReadRows(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
         {
-            return StreamRows(stream, cellRange, sheetName).ToList();
+            return new List<ExcelRow>(StreamRows(stream, cellRange, sheetName));
         }
 
         /// <summary>
-        /// Streams Excel rows lazily using forward-only XmlReader.
+        /// Streams Excel rows lazily from a file. The file handle is released when enumeration completes or is disposed.
+        /// </summary>
+        public static IEnumerable<ExcelRow> StreamRows(string filePath, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
+        {
+            EnsureFileExists(filePath);
+            return StreamRowsFromFile(filePath, cellRange, sheetName);
+        }
+
+        private static IEnumerable<ExcelRow> StreamRowsFromFile(string filePath, string cellRange, string? sheetName)
+        {
+            using var stream = File.Open(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            foreach (var row in StreamRows(stream, cellRange, sheetName))
+            {
+                yield return row;
+            }
+        }
+
+        /// <summary>
+        /// Streams Excel rows lazily using a single forward-only XmlReader.
+        /// Date-formatted numeric cells are returned as ISO text ("yyyy-MM-dd" or "yyyy-MM-dd HH:mm:ss").
         /// Minimal RAM footprint (&lt; 15MB) for maximum scalability.
         /// </summary>
         public static IEnumerable<ExcelRow> StreamRows(Stream stream, string cellRange = ExcelCellAddress.DefaultRange, string? sheetName = null)
@@ -199,248 +276,230 @@ namespace ZeroDocuments.Excel
             int endColIdx = ExcelCellAddress.ColumnNameToIndex(endCol);
 
             using var zip = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: true);
+            var package = XlsxPackageReader.Open(zip);
 
-            // 1. Load shared strings table if present
-            var sharedStrings = LoadSharedStrings(zip);
-
-            // 2. Locate target worksheet entry
-            var sheetEntry = FindSheetEntry(zip, sheetName);
+            var sheetEntry = package.FindSheetEntry(sheetName);
             if (sheetEntry == null) yield break;
 
+            var context = new SheetReadContext(package.LoadSharedStrings(), package.LoadDateStyleMap(), package.Date1904);
+
             using var sheetStream = sheetEntry.Open();
-            using var xmlReader = XmlReader.Create(sheetStream, new XmlReaderSettings
-            {
-                IgnoreWhitespace = true,
-                IgnoreComments = true
-            });
+            using var reader = SpreadsheetXml.CreateReader(sheetStream);
 
-            while (xmlReader.Read())
-            {
-                if (xmlReader.NodeType == XmlNodeType.Element && xmlReader.LocalName == "row")
-                {
-                    string? rAttr = xmlReader.GetAttribute("r");
-                    int rowNum = int.TryParse(rAttr, out int rVal) ? rVal : 0;
-
-                    if (rowNum > 0 && rowNum < startRow)
-                    {
-                        continue;
-                    }
-                    if (rowNum > endRow)
-                    {
-                        yield break;
-                    }
-
-                    var excelRow = new ExcelRow { RowNumber = rowNum };
-                    bool hasAnyCell = false;
-
-                    if (!xmlReader.IsEmptyElement)
-                    {
-                        using var rowSubtree = xmlReader.ReadSubtree();
-                        while (rowSubtree.Read())
-                        {
-                            if (rowSubtree.NodeType == XmlNodeType.Element && rowSubtree.LocalName == "c")
-                            {
-                                string? cellRef = rowSubtree.GetAttribute("r");
-                                string? cellType = rowSubtree.GetAttribute("t");
-
-                                if (string.IsNullOrEmpty(cellRef) ||
-                                    !ExcelCellAddress.TryParseCellReference(cellRef!, out var colName, out _))
-                                {
-                                    continue;
-                                }
-
-                                int colIdx = ExcelCellAddress.ColumnNameToIndex(colName);
-                                if (colIdx < startColIdx || colIdx > endColIdx) continue;
-
-                                string? cellVal = null;
-                                if (!rowSubtree.IsEmptyElement)
-                                {
-                                    using var cellSubtree = rowSubtree.ReadSubtree();
-                                    while (cellSubtree.Read())
-                                    {
-                                        if (cellSubtree.NodeType == XmlNodeType.Element)
-                                        {
-                                            if (cellSubtree.LocalName == "v")
-                                            {
-                                                string rawVal = cellSubtree.ReadElementContentAsString();
-                                                if (cellType == "s")
-                                                {
-                                                    if (int.TryParse(rawVal, out int sIdx) && sIdx >= 0 && sIdx < sharedStrings.Count)
-                                                        cellVal = sharedStrings[sIdx];
-                                                    else
-                                                        cellVal = rawVal;
-                                                }
-                                                else if (cellType == "b")
-                                                {
-                                                    cellVal = rawVal == "1" ? "TRUE" : "FALSE";
-                                                }
-                                                else
-                                                {
-                                                    cellVal = rawVal;
-                                                }
-                                            }
-                                            else if (cellSubtree.LocalName == "t")
-                                            {
-                                                cellVal = cellSubtree.ReadElementContentAsString();
-                                            }
-                                        }
-                                    }
-                                }
-
-                                excelRow[colIdx] = cellVal;
-                                if (!string.IsNullOrEmpty(cellVal))
-                                {
-                                    hasAnyCell = true;
-                                }
-                            }
-                        }
-                    }
-
-                    if (hasAnyCell)
-                    {
-                        yield return excelRow;
-                    }
-                }
-            }
-        }
-
-        #endregion
-
-        #region Private Package & XML Helpers
-
-        private static List<string> LoadSharedStrings(ZipArchive zip)
-        {
-            var list = new List<string>();
-            var ssEntry = zip.Entries.FirstOrDefault(e => e.FullName.Equals("xl/sharedStrings.xml", StringComparison.OrdinalIgnoreCase));
-            if (ssEntry == null) return list;
-
-            using var stream = ssEntry.Open();
-            using var reader = XmlReader.Create(stream, new XmlReaderSettings { IgnoreWhitespace = true });
-
-            var sb = new StringBuilder();
+            int lastRowNum = 0;
             while (reader.Read())
             {
-                if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "si")
+                if (reader.NodeType == XmlNodeType.EndElement && reader.LocalName == "sheetData") yield break;
+                if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "row") continue;
+
+                // Row "r" is optional in SpreadsheetML; implicit rows follow the previous row.
+                int rowNum = TryParsePositiveInt(reader.GetAttribute("r"), out int r) ? r : lastRowNum + 1;
+                lastRowNum = rowNum;
+
+                if (rowNum > endRow) yield break;
+                if (reader.IsEmptyElement) continue;
+
+                if (rowNum < startRow)
                 {
-                    sb.Clear();
-                    if (!reader.IsEmptyElement)
-                    {
-                        using var siSubtree = reader.ReadSubtree();
-                        while (siSubtree.Read())
-                        {
-                            if (siSubtree.NodeType == XmlNodeType.Element && siSubtree.LocalName == "t")
-                            {
-                                sb.Append(siSubtree.ReadElementContentAsString());
-                            }
-                        }
-                    }
-                    list.Add(sb.ToString());
-                }
-            }
-            return list;
-        }
-
-        private static ZipArchiveEntry? FindSheetEntry(ZipArchive zip, string? sheetName)
-        {
-            if (!string.IsNullOrEmpty(sheetName))
-            {
-                // 1. Try to resolve sheet name and relationship via xl/workbook.xml
-                var wbEntry = zip.Entries.FirstOrDefault(e => e.FullName.Equals("xl/workbook.xml", StringComparison.OrdinalIgnoreCase));
-                if (wbEntry != null)
-                {
-                    using var wbStream = wbEntry.Open();
-                    using var reader = XmlReader.Create(wbStream, new XmlReaderSettings { IgnoreWhitespace = true });
-
-                    string? matchedRelId = null;
-                    string? matchedSheetId = null;
-
-                    while (reader.Read())
-                    {
-                        if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "sheet")
-                        {
-                            string? name = reader.GetAttribute("name");
-                            if (string.Equals(name, sheetName, StringComparison.OrdinalIgnoreCase))
-                            {
-                                matchedRelId = reader.GetAttribute("id", NsRelationships) ?? reader.GetAttribute("r:id");
-                                matchedSheetId = reader.GetAttribute("sheetId");
-                                break;
-                            }
-                        }
-                    }
-
-                    // Look up target path from xl/_rels/workbook.xml.rels
-                    if (!string.IsNullOrEmpty(matchedRelId))
-                    {
-                        var relsEntry = zip.Entries.FirstOrDefault(e => e.FullName.Equals("xl/_rels/workbook.xml.rels", StringComparison.OrdinalIgnoreCase));
-                        if (relsEntry != null)
-                        {
-                            using var relsStream = relsEntry.Open();
-                            using var relsReader = XmlReader.Create(relsStream, new XmlReaderSettings { IgnoreWhitespace = true });
-
-                            while (relsReader.Read())
-                            {
-                                if (relsReader.NodeType == XmlNodeType.Element && relsReader.LocalName == "Relationship")
-                                {
-                                    string? id = relsReader.GetAttribute("Id");
-                                    if (string.Equals(id, matchedRelId, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        string? target = relsReader.GetAttribute("Target");
-                                        if (!string.IsNullOrEmpty(target))
-                                        {
-                                            string fullPath = target.StartsWith("xl/") ? target : "xl/" + target.TrimStart('/');
-                                            var found = zip.Entries.FirstOrDefault(e => e.FullName.Equals(fullPath, StringComparison.OrdinalIgnoreCase));
-                                            if (found != null) return found;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (!string.IsNullOrEmpty(matchedSheetId))
-                    {
-                        var entry = zip.Entries.FirstOrDefault(e => e.FullName.Equals($"xl/worksheets/sheet{matchedSheetId}.xml", StringComparison.OrdinalIgnoreCase));
-                        if (entry != null) return entry;
-                    }
+                    SkipToEndElement(reader);
+                    continue;
                 }
 
-                // If a specific sheet name was requested but could not be resolved, do not return the wrong sheet.
-                return null;
+                var excelRow = ReadRowCells(reader, rowNum, startColIdx, endColIdx, context, out bool hasAnyCell);
+                if (hasAnyCell)
+                {
+                    yield return excelRow;
+                }
             }
-
-            // Fallback when no specific sheetName is requested: first sheet entry in xl/worksheets/
-            return zip.Entries.FirstOrDefault(e => e.FullName.Equals("xl/worksheets/sheet1.xml", StringComparison.OrdinalIgnoreCase))
-                   ?? zip.Entries.FirstOrDefault(e => e.FullName.StartsWith("xl/worksheets/sheet", StringComparison.OrdinalIgnoreCase) && e.FullName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase));
         }
 
-        private static object? ConvertValue(string raw, Type targetType)
+        private sealed class SheetReadContext
         {
-            if (string.IsNullOrEmpty(raw)) return null;
-
-            Type underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
-
-            if (underlying == typeof(string)) return raw;
-            if (underlying == typeof(int)) return int.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(long)) return long.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(double)) return double.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(float)) return float.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(decimal)) return decimal.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(bool))
+            public SheetReadContext(List<string> sharedStrings, bool[]? dateStyles, bool date1904)
             {
-                if (raw == "1" || raw.Equals("true", StringComparison.OrdinalIgnoreCase) || raw.Equals("TRUE", StringComparison.OrdinalIgnoreCase)) return true;
-                if (raw == "0" || raw.Equals("false", StringComparison.OrdinalIgnoreCase) || raw.Equals("FALSE", StringComparison.OrdinalIgnoreCase)) return false;
-                return bool.Parse(raw);
-            }
-            if (underlying == typeof(DateTime)) return DateTime.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(DateTimeOffset)) return DateTimeOffset.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(TimeSpan)) return TimeSpan.Parse(raw, CultureInfo.InvariantCulture);
-            if (underlying == typeof(Guid)) return Guid.Parse(raw);
-            if (underlying.IsEnum)
-            {
-                return Enum.Parse(underlying, raw, true);
+                SharedStrings = sharedStrings;
+                DateStyles = dateStyles;
+                Date1904 = date1904;
             }
 
-            return Convert.ChangeType(raw, underlying, CultureInfo.InvariantCulture);
+            public List<string> SharedStrings { get; }
+            public bool[]? DateStyles { get; }
+            public bool Date1904 { get; }
+            public StringBuilder TextBuffer { get; } = new StringBuilder();
+        }
+
+        /// <summary>
+        /// Reads all &lt;c&gt; children of the current &lt;row&gt;. Leaves the reader on the row's end element.
+        /// </summary>
+        private static ExcelRow ReadRowCells(XmlReader reader, int rowNum, int startColIdx, int endColIdx, SheetReadContext ctx, out bool hasAnyCell)
+        {
+            var excelRow = new ExcelRow { RowNumber = rowNum };
+            hasAnyCell = false;
+
+            int rowDepth = reader.Depth;
+            int lastColIdx = 0;
+
+            reader.Read();
+            while (!reader.EOF && !(reader.NodeType == XmlNodeType.EndElement && reader.Depth == rowDepth))
+            {
+                if (reader.NodeType != XmlNodeType.Element)
+                {
+                    reader.Read();
+                    continue;
+                }
+
+                if (reader.LocalName != "c")
+                {
+                    reader.Skip();
+                    continue;
+                }
+
+                // Cell "r" is optional; implicit cells follow the previous cell in the row.
+                string? cellRef = reader.GetAttribute("r");
+                int colIdx = cellRef != null && TryParseColumnIndex(cellRef, out int parsedCol) ? parsedCol : lastColIdx + 1;
+                lastColIdx = colIdx;
+
+                if (colIdx < startColIdx || colIdx > endColIdx)
+                {
+                    reader.Skip();
+                    continue;
+                }
+
+                string? cellVal = ReadCellValue(reader, ctx);
+                excelRow[colIdx] = cellVal;
+                if (!string.IsNullOrEmpty(cellVal)) hasAnyCell = true;
+
+                // ReadCellValue leaves the reader on </c> (or on an empty <c/>); advance past it.
+                reader.Read();
+            }
+
+            return excelRow;
+        }
+
+        /// <summary>
+        /// Resolves the display value of the current &lt;c&gt; element. Leaves the reader on &lt;/c&gt; or the empty &lt;c/&gt;.
+        /// </summary>
+        private static string? ReadCellValue(XmlReader reader, SheetReadContext ctx)
+        {
+            string? cellType = reader.GetAttribute("t");
+            string? styleAttr = reader.GetAttribute("s");
+
+            if (reader.IsEmptyElement) return null;
+
+            string? rawValue = null;
+            bool hasInline = false;
+            var inline = ctx.TextBuffer;
+            inline.Clear();
+
+            int cellDepth = reader.Depth;
+            reader.Read();
+            while (!reader.EOF && !(reader.NodeType == XmlNodeType.EndElement && reader.Depth == cellDepth))
+            {
+                if (reader.NodeType == XmlNodeType.Element)
+                {
+                    switch (reader.LocalName)
+                    {
+                        case "v":
+                            rawValue = reader.ReadElementContentAsString();
+                            continue;
+                        case "is":
+                            hasInline = true;
+                            if (reader.IsEmptyElement)
+                            {
+                                reader.Read();
+                                continue;
+                            }
+                            XlsxPackageReader.ReadTextRuns(reader, inline);
+                            reader.Read();
+                            continue;
+                        case "t":
+                            // Non-standard: bare <t> directly under <c>.
+                            hasInline = true;
+                            inline.Append(reader.ReadElementContentAsString());
+                            continue;
+                        default:
+                            // <f> formulas, <extLst>, etc.
+                            reader.Skip();
+                            continue;
+                    }
+                }
+                reader.Read();
+            }
+
+            switch (cellType)
+            {
+                case "s":
+                    if (rawValue != null && int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out int sIdx) &&
+                        sIdx >= 0 && sIdx < ctx.SharedStrings.Count)
+                    {
+                        return ctx.SharedStrings[sIdx];
+                    }
+                    return rawValue;
+
+                case "b":
+                    return rawValue == null ? null : (rawValue == "1" ? "TRUE" : "FALSE");
+
+                case "inlineStr":
+                    return hasInline ? inline.ToString() : rawValue;
+
+                case null:
+                case "n":
+                    if (rawValue == null) return hasInline ? inline.ToString() : null;
+                    if (ctx.DateStyles != null && TryParsePositiveOrZeroInt(styleAttr, out int styleIdx) &&
+                        styleIdx < ctx.DateStyles.Length && ctx.DateStyles[styleIdx] &&
+                        OADateFormatter.TryFormatSerial(rawValue, ctx.Date1904, out var iso))
+                    {
+                        return iso;
+                    }
+                    return rawValue;
+
+                default:
+                    // "str" (formula string), "e" (error), "d" (ISO 8601 date)
+                    return rawValue ?? (hasInline ? inline.ToString() : null);
+            }
+        }
+
+        private static void SkipToEndElement(XmlReader reader)
+        {
+            int depth = reader.Depth;
+            while (reader.Read())
+            {
+                if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == depth) return;
+            }
+        }
+
+        /// <summary>
+        /// Extracts the 1-based column index from a cell reference ("BC12" -> 55) without allocating substrings.
+        /// </summary>
+        private static bool TryParseColumnIndex(string cellRef, out int columnIndex)
+        {
+            columnIndex = 0;
+            int i = 0;
+            for (; i < cellRef.Length; i++)
+            {
+                char ch = cellRef[i];
+                if (ch >= 'A' && ch <= 'Z') columnIndex = columnIndex * 26 + (ch - 'A' + 1);
+                else if (ch >= 'a' && ch <= 'z') columnIndex = columnIndex * 26 + (ch - 'a' + 1);
+                else break;
+
+                if (columnIndex > SpreadsheetXml.MaxColumns) return false;
+            }
+
+            return i > 0 && i < cellRef.Length && columnIndex > 0;
+        }
+
+        private static bool TryParsePositiveInt(string? text, out int value) =>
+            int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value) && value > 0;
+
+        private static bool TryParsePositiveOrZeroInt(string? text, out int value) =>
+            int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out value);
+
+        private static void EnsureFileExists(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
+            {
+                throw new FileNotFoundException($"Excel file not found: {filePath}");
+            }
         }
 
         #endregion

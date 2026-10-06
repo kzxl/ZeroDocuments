@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.IO;
-using System.Reflection;
 using System.Text;
 using ZeroDocuments.Common;
 
@@ -11,30 +11,25 @@ namespace ZeroDocuments.Csv
     /// <summary>
     /// Pure C# Zero-Dependency RFC 4180 compliant CSV Writer.
     /// Supports streaming, proper character escaping, and DataTable/Collection exports.
+    /// Rows are written as they are enumerated; sources are never buffered in memory.
     /// </summary>
     public static class CsvWriter
     {
         /// <summary>
         /// Gets or sets whether formula injection protection (CWE-1236) is enabled.
-        /// When true, fields beginning with =, +, -, @, \t, or \r are prefixed with a single quote.
+        /// When true, text fields beginning with =, +, -, @, \t, or \r are prefixed with a single quote.
+        /// Typed numeric, boolean, date and time values are never prefixed (e.g. -5 stays "-5").
         /// Default is true.
         /// </summary>
         public static bool FormulaInjectionProtection { get; set; } = true;
+
         /// <summary>
         /// Writes a DataTable to a CSV file.
         /// </summary>
         public static void WriteToFile(string filePath, DataTable table, char delimiter = ',', bool includeHeaders = true, Encoding? encoding = null)
         {
-            if (string.IsNullOrEmpty(filePath))
-                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
-
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+            if (table == null) throw new ArgumentNullException(nameof(table));
+            using var stream = CreateFile(filePath);
             WriteToStream(stream, table, delimiter, includeHeaders, encoding);
         }
 
@@ -46,24 +41,7 @@ namespace ZeroDocuments.Csv
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (table == null) throw new ArgumentNullException(nameof(table));
 
-            var headers = new List<string>();
-            foreach (DataColumn col in table.Columns)
-            {
-                headers.Add(col.ColumnName);
-            }
-
-            var rows = new List<IReadOnlyList<object?>>();
-            foreach (DataRow row in table.Rows)
-            {
-                var values = new object?[table.Columns.Count];
-                for (int i = 0; i < table.Columns.Count; i++)
-                {
-                    values[i] = row[i] == DBNull.Value ? null : row[i];
-                }
-                rows.Add(values);
-            }
-
-            WriteRowsToStream(stream, rows, includeHeaders ? headers : null, delimiter, encoding);
+            WriteRowsToStream(stream, TabularSource.FromDataTable(table), includeHeaders ? TabularSource.GetHeaders(table) : null, delimiter, encoding);
         }
 
         /// <summary>
@@ -71,16 +49,8 @@ namespace ZeroDocuments.Csv
         /// </summary>
         public static void WriteToFile<T>(string filePath, IEnumerable<T> data, char delimiter = ',', bool includeHeaders = true, Encoding? encoding = null)
         {
-            if (string.IsNullOrEmpty(filePath))
-                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
-
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            using var stream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            using var stream = CreateFile(filePath);
             WriteToStream(stream, data, delimiter, includeHeaders, encoding);
         }
 
@@ -93,25 +63,7 @@ namespace ZeroDocuments.Csv
             if (data == null) throw new ArgumentNullException(nameof(data));
 
             var accessors = PropertyAccessorCache.GetAccessors(typeof(T));
-            var headers = new List<string>(accessors.Length);
-            foreach (var acc in accessors)
-            {
-                headers.Add(acc.Name);
-            }
-
-            var rows = new List<IReadOnlyList<object?>>();
-            foreach (var item in data)
-            {
-                if (item == null) continue;
-                var values = new object?[accessors.Length];
-                for (int i = 0; i < accessors.Length; i++)
-                {
-                    values[i] = accessors[i].Getter(item);
-                }
-                rows.Add(values);
-            }
-
-            WriteRowsToStream(stream, rows, includeHeaders ? headers : null, delimiter, encoding);
+            WriteRowsToStream(stream, TabularSource.FromObjects(data, accessors), includeHeaders ? TabularSource.GetHeaders(accessors) : null, delimiter, encoding);
         }
 
         /// <summary>
@@ -121,21 +73,24 @@ namespace ZeroDocuments.Csv
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
             if (rows == null) throw new ArgumentNullException(nameof(rows));
+            if (delimiter == '"' || delimiter == '\r' || delimiter == '\n')
+                throw new ArgumentException("Delimiter cannot be a double quote, CR or LF.", nameof(delimiter));
 
+            bool guard = FormulaInjectionProtection;
             using var writer = new StreamWriter(stream, encoding ?? new UTF8Encoding(true), 4096, leaveOpen: true);
 
-            // 1. Write Header
+            // 1. Header
             if (headers != null && headers.Count > 0)
             {
                 for (int i = 0; i < headers.Count; i++)
                 {
                     if (i > 0) writer.Write(delimiter);
-                    writer.Write(EscapeCsvField(headers[i], delimiter));
+                    writer.Write(EscapeCsvField(headers[i], delimiter, guard));
                 }
                 writer.WriteLine();
             }
 
-            // 2. Write Rows
+            // 2. Rows
             foreach (var row in rows)
             {
                 if (row == null)
@@ -147,14 +102,7 @@ namespace ZeroDocuments.Csv
                 for (int i = 0; i < row.Count; i++)
                 {
                     if (i > 0) writer.Write(delimiter);
-                    var val = row[i];
-                    string text = val switch
-                    {
-                        null => string.Empty,
-                        DateTime dt => dt.TimeOfDay == TimeSpan.Zero ? dt.ToString("yyyy-MM-dd") : dt.ToString("yyyy-MM-dd HH:mm:ss"),
-                        _ => val.ToString() ?? string.Empty
-                    };
-                    writer.Write(EscapeCsvField(text, delimiter));
+                    writer.Write(FormatValue(row[i], delimiter, guard));
                 }
                 writer.WriteLine();
             }
@@ -162,19 +110,34 @@ namespace ZeroDocuments.Csv
             writer.Flush();
         }
 
-        private static string EscapeCsvField(string? field, char delimiter)
+        private static string FormatValue(object? val, char delimiter, bool guard)
+        {
+            switch (val)
+            {
+                case null:
+                    return string.Empty;
+                case DBNull _:
+                    return string.Empty;
+                case string s:
+                    return EscapeCsvField(s, delimiter, guard);
+                case DateTime dt:
+                    // InvariantCulture: ':' in custom formats is the culture's time separator otherwise.
+                    return EscapeCsvField(dt.TimeOfDay == TimeSpan.Zero
+                        ? dt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                        : dt.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture), delimiter, sanitize: false);
+                case sbyte or byte or short or ushort or int or uint or long or ulong or float or double or decimal or bool or TimeSpan or DateTimeOffset:
+                    // Typed values are data, not attacker-controlled text: never prefix (keeps negative numbers intact).
+                    return EscapeCsvField(val.ToString(), delimiter, sanitize: false);
+                default:
+                    return EscapeCsvField(val.ToString(), delimiter, guard);
+            }
+        }
+
+        private static string EscapeCsvField(string? field, char delimiter, bool sanitize)
         {
             if (string.IsNullOrEmpty(field)) return string.Empty;
 
-            string processed = field!;
-            if (FormulaInjectionProtection && processed.Length > 0)
-            {
-                char first = processed[0];
-                if (first == '=' || first == '+' || first == '-' || first == '@' || first == '\t' || first == '\r')
-                {
-                    processed = "'" + processed;
-                }
-            }
+            string processed = sanitize ? FormulaInjectionGuard.Sanitize(field) : field!;
 
             bool mustQuote = processed.IndexOf(delimiter) >= 0 ||
                              processed.IndexOf('"') >= 0 ||
@@ -184,8 +147,21 @@ namespace ZeroDocuments.Csv
             if (!mustQuote) return processed;
 
             // Double up internal quotes: " -> ""
-            string escaped = processed.Replace("\"", "\"\"");
-            return $"\"{escaped}\"";
+            return "\"" + processed.Replace("\"", "\"\"") + "\"";
+        }
+
+        private static FileStream CreateFile(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath))
+                throw new ArgumentException("File path cannot be null or empty.", nameof(filePath));
+
+            string? directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            return new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None);
         }
     }
 }
